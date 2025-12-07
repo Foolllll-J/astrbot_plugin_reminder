@@ -8,6 +8,8 @@ from datetime import datetime
 import json
 import os
 from typing import Dict, List, Optional
+import aiohttp
+import shutil
 
 @register("astrbot_plugin_reminder", "Foolllll", "定时提醒插件，支持cron表达式和图片消息", "0.1.0")
 class ReminderPlugin(Star):
@@ -86,8 +88,9 @@ class ReminderPlugin(Star):
     async def _send_reminder(self, reminder: Dict):
         """发送提醒消息"""
         try:
-            if not self.bot:
-                logger.warning("无法发送提醒，bot 实例未初始化")
+            bot = self.bot
+            if not bot:
+                logger.warning(f"无法发送提醒 '{reminder.get('name', 'unknown')}'，bot 实例未初始化。请先触发任意消息或指令以初始化 bot 实例。")
                 return
             
             target_type = reminder['target_type']
@@ -131,11 +134,8 @@ class ReminderPlugin(Star):
         格式: /添加提醒 <提醒名称> <目标类型> <目标ID> <cron表达式> <消息内容> [图片]
         示例: /添加提醒 每日提醒 群组 123456 0 9 * * * 早上好！[并附上图片]
         """
-        # 捕获 bot 实例
         if not self.bot:
-            from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import AiocqhttpMessageEvent
-            if isinstance(event, AiocqhttpMessageEvent):
-                self.bot = event.bot
+            self.bot = event.bot
         
         # 权限检查：仅管理员可用
         if not event.is_admin():
@@ -155,7 +155,6 @@ class ReminderPlugin(Star):
                     try:
                         # 下载并保存图片
                         if msg_comp.url:
-                            import aiohttp
                             async with aiohttp.ClientSession() as session:
                                 async with session.get(msg_comp.url) as resp:
                                     if resp.status == 200:
@@ -164,7 +163,6 @@ class ReminderPlugin(Star):
                                         images.append(img_filename)
                         elif msg_comp.file:
                             # 如果是本地文件，直接复制
-                            import shutil
                             shutil.copy(msg_comp.file, img_path)
                             images.append(img_filename)
                     except Exception as e:
@@ -263,11 +261,8 @@ class ReminderPlugin(Star):
     @filter.command("查看提醒")
     async def list_reminders(self, event: AstrMessageEvent):
         """查看所有提醒任务"""
-        # 捕获 bot 实例
         if not self.bot:
-            from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import AiocqhttpMessageEvent
-            if isinstance(event, AiocqhttpMessageEvent):
-                self.bot = event.bot
+            self.bot = event.bot
         
         # 权限检查：仅管理员可用
         if not event.is_admin():
@@ -299,11 +294,8 @@ class ReminderPlugin(Star):
         """删除提醒任务
         用法: /删除提醒 <序号>
         """
-        # 捕获 bot 实例
         if not self.bot:
-            from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import AiocqhttpMessageEvent
-            if isinstance(event, AiocqhttpMessageEvent):
-                self.bot = event.bot
+            self.bot = event.bot
         
         # 权限检查：仅管理员可用
         if not event.is_admin():
@@ -342,6 +334,13 @@ class ReminderPlugin(Star):
         except Exception as e:
             logger.error(f"删除提醒失败: {e}")
             yield event.plain_result(f"删除提醒失败: {e}")
+    
+    @filter.event_message_type(filter.EventMessageType.GROUP_MESSAGE, priority=10)
+    async def on_message_event(self, event: AstrMessageEvent):
+        """监听群消息事件以自动捕获 bot 实例（确保重启后定时任务能正常工作）"""
+        if not self.bot:
+            self.bot = event.bot
+            logger.info("已通过群消息事件捕获 bot 实例")
 
     @filter.command("提醒帮助")
     async def show_help(self, event: AstrMessageEvent):
