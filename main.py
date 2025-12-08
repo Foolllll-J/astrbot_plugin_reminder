@@ -92,36 +92,17 @@ class ReminderPlugin(Star):
                 logger.warning(f"无法发送提醒 '{reminder.get('name', 'unknown')}'，unified_msg_origin 未设置")
                 return
             
-            # 兼容旧格式和新格式
-            if 'message_structure' in reminder:
-                # 新格式：按照原始顺序构建消息
-                chain = []
-                for item in reminder['message_structure']:
-                    if item['type'] == 'text':
-                        chain.append(Plain(item['content']))
-                    elif item['type'] == 'image':
-                        full_path = os.path.join(self.data_dir, item['path'])
-                        if os.path.exists(full_path):
-                            chain.append(Image.fromFileSystem(full_path))
-                        else:
-                            logger.warning(f"图片文件不存在: {full_path}")
-            else:
-                # 旧格式：兼容旧的 message 结构
-                message_content = reminder.get('message', {})
-                chain = []
-                
-                # 添加文本消息
-                if message_content.get('text'):
-                    chain.append(Plain(message_content['text']))
-                
-                # 添加图片消息
-                if message_content.get('images'):
-                    for img_path in message_content['images']:
-                        full_path = os.path.join(self.data_dir, img_path)
-                        if os.path.exists(full_path):
-                            chain.append(Image.fromFileSystem(full_path))
-                        else:
-                            logger.warning(f"图片文件不存在: {full_path}")
+            # 按照原始顺序构建消息
+            chain = []
+            for item in reminder['message_structure']:
+                if item['type'] == 'text':
+                    chain.append(Plain(item['content']))
+                elif item['type'] == 'image':
+                    full_path = os.path.join(self.data_dir, item['path'])
+                    if os.path.exists(full_path):
+                        chain.append(Image.fromFileSystem(full_path))
+                    else:
+                        logger.warning(f"图片文件不存在: {full_path}")
             
             if not chain:
                 logger.warning(f"提醒消息为空: {reminder['name']}")
@@ -168,6 +149,12 @@ class ReminderPlugin(Star):
                 return
             
             _, name, remaining = parts
+            
+            # 检查提醒名称是否重复
+            for existing_reminder in self.reminders:
+                if existing_reminder['name'] == name:
+                    yield event.plain_result(f"❌ 提醒名称 '{name}' 已存在，请使用不同的名称")
+                    return
             
             # 尝试解析是否包含目标群号（格式如 @123456）
             remaining_parts = remaining.split(maxsplit=1)
@@ -376,8 +363,11 @@ class ReminderPlugin(Star):
             yield event.plain_result(f"添加提醒失败: {e}")
 
     @filter.command("查看提醒")
-    async def list_reminders(self, event: AstrMessageEvent):
-        """查看所有提醒任务"""
+    async def list_reminders(self, event: AstrMessageEvent, name: str = ""):
+        """查看提醒任务
+        用法1: /查看提醒 - 查看所有提醒任务列表
+        用法2: /查看提醒 <提醒名称> - 查看指定提醒的详细信息（包含完整文字和图片）
+        """
         # 权限检查：仅管理员可用
         if not event.is_admin():
             yield event.plain_result("❌ 此指令仅限Bot管理员使用")
@@ -387,47 +377,100 @@ class ReminderPlugin(Star):
             yield event.plain_result("当前没有提醒任务")
             return
         
-        result = "📋 当前提醒列表:\n\n"
-        for idx, reminder in enumerate(self.reminders, 1):
-            result += f"{idx}. {reminder['name']}\n"
+        # 解析参数：检查是否指定了提醒名称
+        params = name.strip()
+        
+        if params:
+            # 查看指定提醒的详细信息
+            reminder_name = params
+            target_reminder = None
+            
+            # 查找匹配的提醒任务
+            for reminder in self.reminders:
+                if reminder['name'] == reminder_name:
+                    target_reminder = reminder
+                    break
+            
+            if not target_reminder:
+                yield event.plain_result(f"❌ 未找到名为 '{reminder_name}' 的提醒任务\n\n💡 使用 /查看提醒 查看所有提醒任务列表")
+                return
+            
+            # 构建消息链：先添加属性信息
+            chain = []
             
             # 格式化目标显示
-            target = reminder.get('unified_msg_origin', '未知')
+            target = target_reminder.get('unified_msg_origin', '未知')
+            info_text = f"📋 提醒详情: {target_reminder['name']}\n\n"
+            
             if ':GroupMessage:' in target:
                 group_id = target.split(':GroupMessage:')[1]
-                result += f"   目标: 群聊 {group_id}\n"
+                info_text += f"🎯 发送目标: 群聊 {group_id}\n"
             elif ':FriendMessage:' in target:
                 friend_id = target.split(':FriendMessage:')[1]
-                result += f"   目标: 私聊 {friend_id}\n"
+                info_text += f"🎯 发送目标: 私聊 {friend_id}\n"
             else:
-                result += f"   目标: {target}\n"
+                info_text += f"🎯 发送目标: {target}\n"
             
-            result += f"   cron: {reminder['cron']}\n"
+            info_text += f"⏰ 定时规则: {target_reminder['cron']}\n"
+            info_text += f"📅 创建时间: {target_reminder['created_at']}\n"
+            info_text += f"👤 创建者ID: {target_reminder.get('created_by', '未知')}\n"
+            info_text += f"\n📝 提醒内容:\n"
             
-            # 兼容新旧格式
-            if 'message_structure' in reminder:
-                # 新格式
-                text_items = [item['content'] for item in reminder['message_structure'] if item['type'] == 'text']
+            chain.append(Plain(info_text))
+            
+            # 按照原始顺序构建提醒内容
+            for item in target_reminder['message_structure']:
+                if item['type'] == 'text':
+                    chain.append(Plain(item['content']))
+                elif item['type'] == 'image':
+                    full_path = os.path.join(self.data_dir, item['path'])
+                    if os.path.exists(full_path):
+                        chain.append(Image.fromFileSystem(full_path))
+                    else:
+                        logger.warning(f"图片文件不存在: {full_path}")
+            
+            # 使用 MessageChain 返回
+            message_chain = MessageChain()
+            message_chain.chain = chain
+            yield event.chain_result(message_chain.chain)
+        
+        else:
+            # 显示所有提醒任务列表（简略信息）
+            result = "📋 当前提醒列表:\n\n"
+            for idx, reminder in enumerate(self.reminders, 1):
+                result += f"{idx}. {reminder['name']}\n"
+                
+                # 格式化目标显示
+                target = reminder.get('unified_msg_origin', '未知')
+                if ':GroupMessage:' in target:
+                    group_id = target.split(':GroupMessage:')[1]
+                    result += f"   目标: 群聊 {group_id}\n"
+                elif ':FriendMessage:' in target:
+                    friend_id = target.split(':FriendMessage:')[1]
+                    result += f"   目标: 私聊 {friend_id}\n"
+                else:
+                    result += f"   目标: {target}\n"
+                
+                result += f"   cron: {reminder['cron']}\n"
+                
+                # 统计内容
+                text_count = sum(1 for item in reminder['message_structure'] if item['type'] == 'text')
                 image_count = sum(1 for item in reminder['message_structure'] if item['type'] == 'image')
                 
-                if text_items:
-                    preview = ' '.join(text_items)
-                    preview = preview[:30] + "..." if len(preview) > 30 else preview
-                    result += f"   内容: {preview}\n"
+                content_parts = []
+                if text_count > 0:
+                    content_parts.append(f"文字{text_count}段")
                 if image_count > 0:
-                    result += f"   图片: {image_count}张\n"
-            else:
-                # 旧格式
-                msg_text = reminder.get('message', {}).get('text', '')
-                if msg_text:
-                    preview = msg_text[:30] + "..." if len(msg_text) > 30 else msg_text
-                    result += f"   文字: {preview}\n"
-                if reminder.get('message', {}).get('images'):
-                    result += f"   图片: {len(reminder['message']['images'])}张\n"
+                    content_parts.append(f"图片{image_count}张")
+                
+                if content_parts:
+                    result += f"   内容: {' + '.join(content_parts)}\n"
+                
+                result += f"   创建时间: {reminder['created_at']}\n\n"
             
-            result += f"   创建时间: {reminder['created_at']}\n\n"
-        
-        yield event.plain_result(result)
+            result += "💡 使用 /查看提醒 <提醒名称> 查看详细内容"
+            
+            yield event.plain_result(result)
 
     @filter.command("删除提醒")
     async def delete_reminder(self, event: AstrMessageEvent, index: int):
@@ -458,20 +501,9 @@ class ReminderPlugin(Star):
                 logger.warning(f"从调度器移除任务失败: {e}")
             
             # 删除关联的图片文件
-            if 'message_structure' in reminder:
-                # 新格式
-                for item in reminder['message_structure']:
-                    if item['type'] == 'image':
-                        img_path = os.path.join(self.data_dir, item['path'])
-                        try:
-                            if os.path.exists(img_path):
-                                os.remove(img_path)
-                        except Exception as e:
-                            logger.error(f"删除图片文件失败: {e}")
-            elif reminder.get('message', {}).get('images'):
-                # 旧格式
-                for img_filename in reminder['message']['images']:
-                    img_path = os.path.join(self.data_dir, img_filename)
+            for item in reminder['message_structure']:
+                if item['type'] == 'image':
+                    img_path = os.path.join(self.data_dir, item['path'])
                     try:
                         if os.path.exists(img_path):
                             os.remove(img_path)
@@ -544,7 +576,8 @@ class ReminderPlugin(Star):
 30 8-17/2 * * * - 8:30到17:30之间，每2小时
 
 🔹 查看提醒
-/查看提醒
+/查看提醒 - 查看所有提醒任务列表
+/查看提醒 <提醒名称> - 查看指定提醒的详细内容（包含完整文字和图片）
 
 🔹 删除提醒
 /删除提醒 <序号>
