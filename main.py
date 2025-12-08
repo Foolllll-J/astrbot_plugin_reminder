@@ -7,7 +7,7 @@ from apscheduler.triggers.cron import CronTrigger
 from datetime import datetime
 import json
 import os
-from typing import Dict, List, Optional
+from typing import Dict, List
 import aiohttp
 import shutil
 
@@ -21,7 +21,6 @@ class ReminderPlugin(Star):
         os.makedirs(self.data_dir, exist_ok=True)
         self.data_file = os.path.join(self.data_dir, "reminders.json")
         self.reminders: List[Dict] = []
-        self.bot = None
         self._load_reminders()
         logger.info("定时提醒插件已加载")
 
@@ -88,42 +87,52 @@ class ReminderPlugin(Star):
     async def _send_reminder(self, reminder: Dict):
         """发送提醒消息"""
         try:
-            bot = self.bot
-            if not bot:
-                logger.warning(f"无法发送提醒 '{reminder.get('name', 'unknown')}'，bot 实例未初始化。请先触发任意消息或指令以初始化 bot 实例。")
+            unified_msg_origin = reminder.get('unified_msg_origin')
+            if not unified_msg_origin:
+                logger.warning(f"无法发送提醒 '{reminder.get('name', 'unknown')}'，unified_msg_origin 未设置")
                 return
             
-            target_type = reminder['target_type']
-            target_id = reminder['target_id']
-            message_content = reminder['message']
+            # 兼容旧格式和新格式
+            if 'message_structure' in reminder:
+                # 新格式：按照原始顺序构建消息
+                chain = []
+                for item in reminder['message_structure']:
+                    if item['type'] == 'text':
+                        chain.append(Plain(item['content']))
+                    elif item['type'] == 'image':
+                        full_path = os.path.join(self.data_dir, item['path'])
+                        if os.path.exists(full_path):
+                            chain.append(Image.fromFileSystem(full_path))
+                        else:
+                            logger.warning(f"图片文件不存在: {full_path}")
+            else:
+                # 旧格式：兼容旧的 message 结构
+                message_content = reminder.get('message', {})
+                chain = []
+                
+                # 添加文本消息
+                if message_content.get('text'):
+                    chain.append(Plain(message_content['text']))
+                
+                # 添加图片消息
+                if message_content.get('images'):
+                    for img_path in message_content['images']:
+                        full_path = os.path.join(self.data_dir, img_path)
+                        if os.path.exists(full_path):
+                            chain.append(Image.fromFileSystem(full_path))
+                        else:
+                            logger.warning(f"图片文件不存在: {full_path}")
             
-            # 构建消息内容
-            message_parts = []
-            
-            # 处理文本消息
-            if message_content.get('text'):
-                message_parts.append({"type": "text", "data": {"text": message_content['text']}})
-            
-            # 处理图片消息
-            if message_content.get('images'):
-                for img_path in message_content['images']:
-                    full_path = os.path.join(self.data_dir, img_path)
-                    if os.path.exists(full_path):
-                        message_parts.append({"type": "image", "data": {"file": f"file:///{os.path.abspath(full_path)}"}})
-                    else:
-                        logger.warning(f"图片文件不存在: {full_path}")
-            
-            if not message_parts:
+            if not chain:
                 logger.warning(f"提醒消息为空: {reminder['name']}")
                 return
             
-            # 发送消息
-            if target_type == 'group':
-                await self.bot.api.call_action('send_group_msg', group_id=int(target_id), message=message_parts)
-            else:
-                await self.bot.api.call_action('send_private_msg', user_id=int(target_id), message=message_parts)
+            # 使用 MessageChain 发送消息
+            message_chain = MessageChain()
+            message_chain.chain = chain
+            await self.context.send_message(unified_msg_origin, message_chain)
             
-            logger.info(f"提醒已发送: {reminder['name']} -> {target_type}:{target_id}")
+            logger.info(f"提醒已发送: {reminder['name']} -> {unified_msg_origin}")
             
         except Exception as e:
             logger.error(f"发送提醒失败: {reminder.get('name', 'unknown')}, {e}", exc_info=True)
@@ -131,11 +140,10 @@ class ReminderPlugin(Star):
     @filter.command("添加提醒")
     async def add_reminder(self, event: AstrMessageEvent):
         """添加定时提醒
-        格式: /添加提醒 <提醒名称> <目标类型> <目标ID> <cron表达式> <消息内容> [图片]
-        示例: /添加提醒 每日提醒 群组 123456 0 9 * * * 早上好！[并附上图片]
+        格式1（当前会话）: /添加提醒 <提醒名称> <cron表达式> <消息内容> [图片]
+        格式2（指定群号）: /添加提醒 <提醒名称> @<群号> <cron表达式> <消息内容> [图片]
+        示例: /添加提醒 每日提醒 0 9 * * * 早上好！[并附上图片]
         """
-        if not self.bot:
-            self.bot = event.bot
         
         # 权限检查：仅管理员可用
         if not event.is_admin():
@@ -143,71 +151,110 @@ class ReminderPlugin(Star):
             return
         
         try:
-            # 先提取消息中的图片
-            images = []
-            message_chain = event.get_messages()
-            for msg_comp in message_chain:
-                if isinstance(msg_comp, Image):
-                    # 保存图片到data目录
-                    img_filename = f"img_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{len(images)}.jpg"
-                    img_path = os.path.join(self.data_dir, img_filename)
-                    
-                    try:
-                        # 下载并保存图片
-                        if msg_comp.url:
-                            async with aiohttp.ClientSession() as session:
-                                async with session.get(msg_comp.url) as resp:
-                                    if resp.status == 200:
-                                        with open(img_path, 'wb') as f:
-                                            f.write(await resp.read())
-                                        images.append(img_filename)
-                        elif msg_comp.file:
-                            # 如果是本地文件，直接复制
-                            shutil.copy(msg_comp.file, img_path)
-                            images.append(img_filename)
-                    except Exception as e:
-                        logger.error(f"保存图片失败: {e}")
-            
             # 解析文本参数
-            parts = event.message_str.strip().split(maxsplit=5)
+            parts = event.message_str.strip().split(maxsplit=2)
             
-            if len(parts) < 6:
+            if len(parts) < 3:
                 yield event.plain_result(
                     "格式错误！\n"
-                    "用法: /添加提醒 <提醒名称> <目标类型> <目标ID> <cron表达式(5段)> <消息内容>\n"
-                    "目标类型: 群组 或 私聊\n"
+                    "用法1（当前会话）: /添加提醒 <提醒名称> <cron表达式(5段)> <消息内容>\n"
+                    "用法2（指定群聊）: /添加提醒 <提醒名称> @<群号> <cron表达式(5段)> <消息内容>\n"
                     "cron表达式格式: 分 时 日 月 周\n"
-                    "示例: /添加提醒 早安 群组 123456 0 9 * * * 早上好！\n"
-                    "💡 可以在发送指令的同时附上图片，提醒时会一起发送文字和图片"
+                    "示例1: /添加提醒 早安 0 9 * * * 早上好！\n"
+                    "示例2: /添加提醒 早安 @123456 0 9 * * * 早上好！\n"
+                    "💡 可以在发送指令的同时附上图片，提醒时会一起发送文字和图片\n"
+                    "💡 不指定群号时，会自动发送到当前会话"
                 )
                 return
             
-            _, name, target_type_str, target_id, cron_expr_part, message_text = parts
+            _, name, remaining = parts
             
-            # 验证目标类型
-            if target_type_str not in ['群组', '私聊']:
-                yield event.plain_result("目标类型必须是 '群组' 或 '私聊'")
-                return
-            
-            target_type = 'group' if target_type_str == '群组' else 'private'
+            # 尝试解析是否包含目标群号（格式如 @123456）
+            remaining_parts = remaining.split(maxsplit=1)
+            if len(remaining_parts) >= 2 and remaining_parts[0].startswith('@'):
+                # 格式2：指定了目标群号
+                group_id = remaining_parts[0][1:]  # 去掉 @ 符号
+                remaining = remaining_parts[1]
+                
+                # 构建 unified_msg_origin
+                # 从当前会话中提取平台信息
+                current_origin = event.unified_msg_origin
+                if ':' in current_origin:
+                    platform = current_origin.split(':')[0]
+                    unified_msg_origin = f"{platform}:GroupMessage:{group_id}"
+                    logger.info(f"检测到目标群号: {group_id}, 构建会话ID: {unified_msg_origin}")
+                else:
+                    yield event.plain_result("❌ 无法识别当前平台信息，请使用当前会话模式")
+                    return
+            else:
+                # 格式1：使用当前会话
+                unified_msg_origin = event.unified_msg_origin
+                logger.info(f"使用当前会话ID: {unified_msg_origin}")
             
             # 解析cron表达式（需要5段）
-            cron_parts = cron_expr_part.split()
-            message_parts = message_text.split()
+            # 使用 maxsplit=5 来分割，前5段是cron表达式，剩余的都是消息内容
+            remaining_parts = remaining.split(maxsplit=5)
             
-            # cron需要5段，所以从message_text中取出剩余部分
-            while len(cron_parts) < 5 and message_parts:
-                cron_parts.append(message_parts.pop(0))
-            
-            if len(cron_parts) != 5:
+            if len(remaining_parts) < 5:
                 yield event.plain_result(
                     "cron表达式格式错误！需要5段: 分 时 日 月 周\n"
                     "示例: 0 9 * * * 表示每天9点0分"
                 )
                 return
             
+            # 前5段是cron表达式，第6段（如果存在）是消息内容
+            # 注意：如果消息前面有图片，第5段可能会和消息文本粘在一起（如 "*1072248491"）
+            # 需要清理第5段，只保留合法的cron字符
+            cron_parts = remaining_parts[:5]
+            
+            # 清理第5段（周），只保留合法的cron值
+            # 周的合法格式：数字(0-6)、*、范围(如1-5)、列表(如1,3,5)、步长(如*/2)
+            last_part = cron_parts[4]
+            cleaned_last_part = ''
+            
+            # 策略：遇到空格或其他明显的文本内容就停止
+            # 合法字符：0-9, *, -, ,, /
+            # 但要防止过长的数字串（如 1072248491）
+            for i, char in enumerate(last_part):
+                if char in '0123456789*-,/':
+                    # 检查是否是异常长的数字（超过2位连续数字很可能是文本内容）
+                    if char.isdigit():
+                        # 向后看，如果有超过2位连续数字，可能是文本
+                        digit_count = 1
+                        for j in range(i + 1, min(i + 10, len(last_part))):
+                            if last_part[j].isdigit():
+                                digit_count += 1
+                            else:
+                                break
+                        # 周的数字范围是 0-6，最多2位（比如 */10 这种步长）
+                        # 如果有超过3位连续数字，很可能是文本内容粘上来了
+                        if digit_count > 3:
+                            break
+                    cleaned_last_part += char
+                else:
+                    # 遇到非法字符，停止
+                    break
+            
+            if not cleaned_last_part:
+                # 如果清理后为空，说明格式错误
+                yield event.plain_result(
+                    "cron表达式格式错误！第5段（周）无效\n"
+                    "示例: 0 9 * * * 表示每天9点0分"
+                )
+                return
+            
+            cron_parts[4] = cleaned_last_part
             cron_expr = ' '.join(cron_parts)
-            message_text = ' '.join(message_parts) if message_parts else ""
+            
+            # 消息文本是第6段（如果有），加上从第5段截断的部分
+            message_text = ""
+            if len(remaining_parts) > 5:
+                message_text = remaining_parts[5]
+            # 加上从第5段截断的部分
+            if len(last_part) > len(cleaned_last_part):
+                message_text = last_part[len(cleaned_last_part):] + (' ' + message_text if message_text else '')
+            
+            message_text = message_text.strip()
             
             # 验证cron表达式
             try:
@@ -217,8 +264,67 @@ class ReminderPlugin(Star):
                 yield event.plain_result(f"cron表达式无效: {e}")
                 return
             
-            # 验证至少有文字或图片
-            if not message_text and not images:
+            # 提取完整的消息结构（图文混排）
+            # 策略：直接在消息链中查找 cron 表达式的结束位置
+            message_structure = []
+            message_chain = event.get_messages()
+            
+            # 遍历消息链，在 Plain 中找到 cron 表达式的结束位置
+            cron_found = False
+            
+            for msg_comp in message_chain:
+                if isinstance(msg_comp, Plain):
+                    if not cron_found and cron_expr in msg_comp.text:
+                        # 找到了 cron 表达式
+                        cron_index = msg_comp.text.index(cron_expr)
+                        cron_end = cron_index + len(cron_expr)
+                        
+                        # 提取 cron 之后的文本
+                        content = msg_comp.text[cron_end:]
+                        cron_found = True
+                        
+                        if content.strip():
+                            message_structure.append({
+                                "type": "text",
+                                "content": content
+                            })
+                    elif cron_found:
+                        # 已经找到 cron，后续文本直接添加
+                        if msg_comp.text.strip():
+                            message_structure.append({
+                                "type": "text",
+                                "content": msg_comp.text
+                            })
+                        
+                elif isinstance(msg_comp, Image):
+                    # 图片只在找到 cron 之后添加
+                    if cron_found:
+                        img_filename = f"img_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}.jpg"
+                        img_path = os.path.join(self.data_dir, img_filename)
+                        
+                        try:
+                            saved = False
+                            if msg_comp.url:
+                                async with aiohttp.ClientSession() as session:
+                                    async with session.get(msg_comp.url) as resp:
+                                        if resp.status == 200:
+                                            with open(img_path, 'wb') as f:
+                                                f.write(await resp.read())
+                                            saved = True
+                            elif msg_comp.file:
+                                shutil.copy(msg_comp.file, img_path)
+                                saved = True
+                            
+                            if saved:
+                                message_structure.append({
+                                    "type": "image",
+                                    "path": img_filename
+                                })
+                        except Exception as e:
+                            logger.error(f"保存图片失败: {e}")
+            
+            # 验证至少有消息内容
+            if not message_structure:
                 yield event.plain_result("提醒内容不能为空，请至少提供文字或图片")
                 return
             
@@ -227,13 +333,9 @@ class ReminderPlugin(Star):
             reminder = {
                 'id': reminder_id,
                 'name': name,
-                'target_type': target_type,
-                'target_id': target_id,
+                'unified_msg_origin': unified_msg_origin,
                 'cron': cron_expr,
-                'message': {
-                    'text': message_text,
-                    'images': images
-                },
+                'message_structure': message_structure,  # 保存完整的消息结构
                 'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
                 'created_by': event.get_sender_id()
             }
@@ -245,13 +347,28 @@ class ReminderPlugin(Star):
             self.reminders.append(reminder)
             self._save_reminders()
             
-            result_msg = f"✅ 提醒已添加！\n名称: {name}\n目标: {target_type_str} {target_id}\ncron: {cron_expr}"
-            if message_text:
-                result_msg += f"\n文字: {message_text}"
-            if images:
-                result_msg += f"\n图片: {len(images)}张"
+            is_current_session = (unified_msg_origin == event.unified_msg_origin)
+            if is_current_session:
+                target_desc = "当前会话"
+            else:
+                # 提取群号显示
+                if ':GroupMessage:' in unified_msg_origin:
+                    group_id = unified_msg_origin.split(':GroupMessage:')[1]
+                    target_desc = f"群聊 {group_id}"
+                else:
+                    target_desc = unified_msg_origin
             
-            logger.info(f"成功添加提醒: {name}, 目标: {target_type_str} {target_id}, cron: {cron_expr}")
+            # 统计消息内容
+            text_count = sum(1 for item in message_structure if item['type'] == 'text')
+            image_count = sum(1 for item in message_structure if item['type'] == 'image')
+            
+            result_msg = f"✅ 提醒已添加！\n名称: {name}\n目标: {target_desc}\ncron: {cron_expr}"
+            if text_count > 0:
+                result_msg += f"\n文字: {text_count}段"
+            if image_count > 0:
+                result_msg += f"\n图片: {image_count}张"
+            
+            logger.info(f"成功添加提醒: {name}, unified_msg_origin: {unified_msg_origin}, cron: {cron_expr}")
             yield event.plain_result(result_msg)
             
         except Exception as e:
@@ -261,9 +378,6 @@ class ReminderPlugin(Star):
     @filter.command("查看提醒")
     async def list_reminders(self, event: AstrMessageEvent):
         """查看所有提醒任务"""
-        if not self.bot:
-            self.bot = event.bot
-        
         # 权限检查：仅管理员可用
         if not event.is_admin():
             yield event.plain_result("❌ 此指令仅限Bot管理员使用")
@@ -275,16 +389,42 @@ class ReminderPlugin(Star):
         
         result = "📋 当前提醒列表:\n\n"
         for idx, reminder in enumerate(self.reminders, 1):
-            target_type_str = "群组" if reminder['target_type'] == 'group' else "私聊"
             result += f"{idx}. {reminder['name']}\n"
-            result += f"   目标: {target_type_str} {reminder['target_id']}\n"
+            
+            # 格式化目标显示
+            target = reminder.get('unified_msg_origin', '未知')
+            if ':GroupMessage:' in target:
+                group_id = target.split(':GroupMessage:')[1]
+                result += f"   目标: 群聊 {group_id}\n"
+            elif ':FriendMessage:' in target:
+                friend_id = target.split(':FriendMessage:')[1]
+                result += f"   目标: 私聊 {friend_id}\n"
+            else:
+                result += f"   目标: {target}\n"
+            
             result += f"   cron: {reminder['cron']}\n"
-            msg_text = reminder['message']['text']
-            if msg_text:
-                preview = msg_text[:30] + "..." if len(msg_text) > 30 else msg_text
-                result += f"   文字: {preview}\n"
-            if reminder['message'].get('images'):
-                result += f"   图片: {len(reminder['message']['images'])}张\n"
+            
+            # 兼容新旧格式
+            if 'message_structure' in reminder:
+                # 新格式
+                text_items = [item['content'] for item in reminder['message_structure'] if item['type'] == 'text']
+                image_count = sum(1 for item in reminder['message_structure'] if item['type'] == 'image')
+                
+                if text_items:
+                    preview = ' '.join(text_items)
+                    preview = preview[:30] + "..." if len(preview) > 30 else preview
+                    result += f"   内容: {preview}\n"
+                if image_count > 0:
+                    result += f"   图片: {image_count}张\n"
+            else:
+                # 旧格式
+                msg_text = reminder.get('message', {}).get('text', '')
+                if msg_text:
+                    preview = msg_text[:30] + "..." if len(msg_text) > 30 else msg_text
+                    result += f"   文字: {preview}\n"
+                if reminder.get('message', {}).get('images'):
+                    result += f"   图片: {len(reminder['message']['images'])}张\n"
+            
             result += f"   创建时间: {reminder['created_at']}\n\n"
         
         yield event.plain_result(result)
@@ -294,15 +434,17 @@ class ReminderPlugin(Star):
         """删除提醒任务
         用法: /删除提醒 <序号>
         """
-        if not self.bot:
-            self.bot = event.bot
-        
         # 权限检查：仅管理员可用
         if not event.is_admin():
             yield event.plain_result("❌ 此指令仅限Bot管理员使用")
             return
         
         try:
+            # 先检查是否有提醒任务
+            if len(self.reminders) == 0:
+                yield event.plain_result("❌ 当前没有提醒任务")
+                return
+            
             if index < 1 or index > len(self.reminders):
                 yield event.plain_result(f"序号无效，请输入1-{len(self.reminders)}之间的数字")
                 return
@@ -316,7 +458,18 @@ class ReminderPlugin(Star):
                 logger.warning(f"从调度器移除任务失败: {e}")
             
             # 删除关联的图片文件
-            if reminder['message'].get('images'):
+            if 'message_structure' in reminder:
+                # 新格式
+                for item in reminder['message_structure']:
+                    if item['type'] == 'image':
+                        img_path = os.path.join(self.data_dir, item['path'])
+                        try:
+                            if os.path.exists(img_path):
+                                os.remove(img_path)
+                        except Exception as e:
+                            logger.error(f"删除图片文件失败: {e}")
+            elif reminder.get('message', {}).get('images'):
+                # 旧格式
                 for img_filename in reminder['message']['images']:
                     img_path = os.path.join(self.data_dir, img_filename)
                     try:
@@ -335,12 +488,7 @@ class ReminderPlugin(Star):
             logger.error(f"删除提醒失败: {e}")
             yield event.plain_result(f"删除提醒失败: {e}")
     
-    @filter.event_message_type(filter.EventMessageType.GROUP_MESSAGE, priority=10)
-    async def on_message_event(self, event: AstrMessageEvent):
-        """监听群消息事件以自动捕获 bot 实例（确保重启后定时任务能正常工作）"""
-        if not self.bot:
-            self.bot = event.bot
-            logger.info("已通过群消息事件捕获 bot 实例")
+
 
     @filter.command("提醒帮助")
     async def show_help(self, event: AstrMessageEvent):
@@ -348,27 +496,29 @@ class ReminderPlugin(Star):
         help_text = """📖 定时提醒插件使用帮助
 
 🔹 添加提醒
-/添加提醒 <名称> <目标类型> <目标ID> <cron表达式> <消息>
-- 目标类型: 群组 或 私聊
+用法1（当前会话）: /添加提醒 <名称> <cron表达式> <消息>
+用法2（指定群聊）: /添加提醒 <名称> @<群号> <cron表达式> <消息>
 - cron表达式: 5段格式 (分 时 日 月 周)
+- 💡 不指定群号时，自动发送到当前会话
+- 💡 指定群号时，只能指定群聊，不支持私聊
 - 💡 发送指令时可以同时附上图片，提醒会包含文字+图片
 - 🔒 仅限Bot管理员使用
 
 基础示例:
-/添加提醒 早安 群组 123456 0 9 * * * 早上好！
-(每天9点发送)
+/添加提醒 早安 0 9 * * * 早上好！
+(每天9点在当前会话发送)
 
-/添加提醒 周报 私聊 987654 0 18 * * 5 本周工作总结
-(每周五18点发送)
+/添加提醒 周报 @123456789 0 18 * * 5 本周工作总结
+(每周五18点在指定群聊发送，可实现远程控制)
 
 ⭐ 多时间点示例（用逗号分隔）:
-/添加提醒 喝水 群组 123456 0 9,14,18 * * * 记得喝水！
+/添加提醒 喝水 0 9,14,18 * * * 记得喝水！
 (每天9点、14点、18点各发送一次)
 
-/添加提醒 课间休息 群组 123456 0 10,15,20 * * 1-5 该休息了
+/添加提醒 课间休息 0 10,15,20 * * 1-5 该休息了
 (工作日10点、15点、20点发送)
 
-/添加提醒 整点报时 群组 123456 0 */2 * * * 当前时间...
+/添加提醒 整点报时 0 */2 * * * 当前时间...
 (每2小时发送)
 
 🔹 cron表达式详解
