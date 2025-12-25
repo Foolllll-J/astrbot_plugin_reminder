@@ -18,7 +18,6 @@ import shutil
 import asyncio
 import time
 
-# 导入sy插件的相关模块
 from .core.command_trigger import CommandTrigger
 
 @register("astrbot_plugin_reminder", "Foolllll", "支持定时发送消息或执行任务到指定会话，支持cron表达式、富媒体消息", "1.0.0")
@@ -34,6 +33,7 @@ class ReminderPlugin(Star):
         self.linked_tasks: Dict[str, List[str]] = {}  # {reminder_name: [task_command1, task_command2, ...]}
         self._load_reminders()
         self.monitor_timeout = self.config.get('monitor_timeout', 60)
+        self._running_triggers = set()
         logger.info("定时提醒插件已加载")
 
     def _create_async_compatible_mock_bot(self):
@@ -342,15 +342,20 @@ class ReminderPlugin(Star):
             task_type: 任务类型，"task" 或 "linked_command"
         """
         logger.info(f"检测到{task_type}，执行: {command}")
+        trigger = CommandTrigger(self.context, {"monitor_timeout": self.monitor_timeout})
+        
+        # 创建任务并记录
+        task = asyncio.create_task(trigger.trigger_and_forward_command(unified_msg_origin, item, command))
+        self._running_triggers.add(task)
+        
         try:
-            # 使用sy插件的CommandTrigger来处理指令执行
-            trigger = CommandTrigger(self.context, [], {"monitor_timeout": self.monitor_timeout})
-            await trigger.trigger_and_forward_command(unified_msg_origin, item, command)
-
+            await task # 等待监控结束
             logger.info(f"{task_type}执行完成: {item['name']} -> {command}")
         except Exception as cmd_error:
-            logger.error(f"执行{task_type}失败: {item['name']}, 指令: {command}, 错误: {cmd_error}")
-
+            logger.error(f"执行{task_type}错误: {cmd_error}")
+        finally:
+            self._running_triggers.discard(task) # 任务结束移除记录
+        
     async def _execute_linked_command(self, linked_command: str, unified_msg_origin: str, item: Dict):
         """执行单个链接任务"""
         await self._execute_command_common(linked_command, unified_msg_origin, item, "链接任务")
@@ -1141,9 +1146,22 @@ class ReminderPlugin(Star):
         yield event.plain_result(help_text)
 
     async def terminate(self):
-        """插件卸载时关闭调度器"""
+        """插件卸载时强制清理所有任务"""
+        # 1. 关闭调度器
         if self.scheduler.running:
-            self.scheduler.shutdown()
-        logger.info("定时提醒插件已卸载")
+            self.scheduler.shutdown(wait=False)
+            
+        # 2. 强制取消所有正在运行的 CommandTrigger 监控任务
+        if self._running_triggers:
+            logger.info(f"正在清理 {len(self._running_triggers)} 个指令监控任务...")
+            for task in self._running_triggers:
+                if not task.done():
+                    task.cancel()
+            
+            # 给 1 秒时间等待它们完成清理逻辑
+            await asyncio.gather(*self._running_triggers, return_exceptions=True)
+            self._running_triggers.clear()
+
+        logger.info("定时提醒插件已彻底卸载并清理任务")
 
 
