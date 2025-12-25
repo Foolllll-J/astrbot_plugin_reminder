@@ -246,9 +246,9 @@ class CommandTrigger:
                 forward_msg = MessageChain()
 
                 # 添加@消息（如果需要）
-                should_at = True  # 默认需要@，可以根据配置调整
-                if should_at and not self._is_private_chat(unified_msg_origin) and "created_by" in reminder and reminder["created_by"]:
-                    self._add_at_message(forward_msg, original_msg_origin, reminder)
+                # should_at = True  # 默认需要@，可以根据配置调整
+                # if should_at and not self._is_private_chat(unified_msg_origin) and "created_by" in reminder and reminder["created_by"]:
+                #     self._add_at_message(forward_msg, original_msg_origin, reminder)
 
                 # 添加捕获到的消息内容
                 for component in captured_msg.chain:
@@ -269,9 +269,9 @@ class CommandTrigger:
             error_msg = MessageChain()
 
             # 添加@消息（如果需要）
-            should_at = True
-            if should_at and not self._is_private_chat(unified_msg_origin) and "created_by" in reminder and reminder["created_by"]:
-                self._add_at_message(error_msg, original_msg_origin, reminder)
+            # should_at = True
+            # if should_at and not self._is_private_chat(unified_msg_origin) and "created_by" in reminder and reminder["created_by"]:
+            #     self._add_at_message(error_msg, original_msg_origin, reminder)
 
             error_msg.chain.append(Plain(f"[指令任务] {command} 执行失败，未收到响应"))
 
