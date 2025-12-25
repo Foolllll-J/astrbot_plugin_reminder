@@ -18,6 +18,9 @@ import shutil
 import asyncio
 import time
 
+# 导入sy插件的相关模块
+from .core.command_trigger import CommandTrigger
+
 @register("astrbot_plugin_reminder", "Foolllll", "支持定时发送消息或执行任务到指定会话，支持cron表达式、富媒体消息", "1.0.0")
 class ReminderPlugin(Star):
     def __init__(self, context: Context, config: dict = None):
@@ -329,6 +332,7 @@ class ReminderPlugin(Star):
         except Exception as e:
             logger.error(f"发送提醒失败: {item.get('name', 'unknown')}, {e}", exc_info=True)
 
+
     async def _execute_command_common(self, command: str, unified_msg_origin: str, item: Dict, task_type: str = "task"):
         """执行命令的通用方法，用于任务和链接任务
         Args:
@@ -339,95 +343,9 @@ class ReminderPlugin(Star):
         """
         logger.info(f"检测到{task_type}，执行: {command}")
         try:
-            # 使用辅助方法创建事件对象
-            event = self._create_timer_event(command, unified_msg_origin, item)
-
-            # 设置消息拦截器
-            captured_messages = []
-            original_send = event.send
-            original_call_action = None
-
-            if hasattr(event, 'bot') and hasattr(event.bot, 'api') and hasattr(event.bot.api, 'call_action'):
-                original_call_action = event.bot.api.call_action
-
-            async def intercepted_send(message_chain):
-                logger.info(f"捕获到指令响应消息，包含 {len(message_chain.chain)} 个组件")
-                captured_messages.append(message_chain)
-                # 立即转发捕获到的消息
-                await self.context.send_message(unified_msg_origin, message_chain)
-                event._has_send_oper = True
-                return True
-
-            async def intercepted_call_action(action, **params):
-                if action in ["send_private_msg", "send_group_msg", "send_private_forward_msg", "send_group_forward_msg"]:
-                    logger.info(f"拦截到bot.api.call_action调用: {action}")
-
-                    # 转换消息数据为MessageChain
-                    msg_chain = EventMessageChain()
-                    message_data = params.get("message", [])
-
-                    if isinstance(message_data, list):
-                        for seg in message_data:
-                            if isinstance(seg, dict):
-                                seg_type = seg.get("type", "")
-                                seg_data = seg.get("data", {})
-
-                                if seg_type == "text":
-                                    msg_chain.chain.append(Plain(seg_data.get("text", "")))
-                                elif seg_type == "at":
-                                    qq = seg_data.get("qq", "")
-                                    msg_chain.chain.append(Plain(f"@{qq}"))  # Simplified - using Plain instead of At
-                                # 根据需要添加更多消息类型处理
-
-                    if msg_chain.chain:
-                        captured_messages.append(msg_chain)
-                        # 立即转发捕获到的消息
-                        await self.context.send_message(unified_msg_origin, msg_chain)
-
-                    event._has_send_oper = True
-                    return {"message_id": 12345}
-                else:
-                    if original_call_action:
-                        return await original_call_action(action, **params)
-                    return {}
-
-            event.send = intercepted_send
-
-            if original_call_action:
-                event.bot.api.call_action = intercepted_call_action
-
-            # 提交事件到队列
-            event_queue = self.context.get_event_queue()
-            event_queue.put_nowait(event)
-
-            logger.info(f"{task_type}指令事件已提交到队列，等待响应捕获: {command}")
-
-            start_time = asyncio.get_event_loop().time()
-            max_wait_time = self.monitor_timeout  # 使用配置的监控超时时间
-            check_interval = 0.1  # 100毫秒
-            last_message_count = 0
-            no_new_message_duration = 0  # 没有新消息的时间（秒）
-
-            logger.info(f"开始监控消息捕获，最多等待 {max_wait_time} 秒，检查间隔 {check_interval} 秒")
-
-            while (asyncio.get_event_loop().time() - start_time) < max_wait_time:
-                current_message_count = len(captured_messages)
-                if current_message_count > last_message_count:
-                    logger.info(f"检测到新消息被捕获，当前总数: {current_message_count}，重置无新消息计时")
-                    last_message_count = current_message_count
-                    no_new_message_duration = 0  # 重置无新消息计时
-                else:
-                    no_new_message_duration += check_interval
-
-                await asyncio.sleep(check_interval)
-
-            total_wait_time = asyncio.get_event_loop().time() - start_time
-            logger.info(f"结束等待，总等待时间: {total_wait_time:.1f} 秒，共捕获 {len(captured_messages)} 条消息")
-
-            # 恢复原始方法
-            event.send = original_send
-            if original_call_action:
-                event.bot.api.call_action = original_call_action
+            # 使用sy插件的CommandTrigger来处理指令执行
+            trigger = CommandTrigger(self.context, [], {"monitor_timeout": self.monitor_timeout})
+            await trigger.trigger_and_forward_command(unified_msg_origin, item, command)
 
             logger.info(f"{task_type}执行完成: {item['name']} -> {command}")
         except Exception as cmd_error:
@@ -1227,3 +1145,5 @@ class ReminderPlugin(Star):
         if self.scheduler.running:
             self.scheduler.shutdown()
         logger.info("定时提醒插件已卸载")
+
+
