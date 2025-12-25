@@ -1,12 +1,8 @@
-from astrbot.api.event import filter, AstrMessageEvent, MessageEventResult, MessageChain
+from astrbot.api.event import filter, AstrMessageEvent, MessageChain
 from astrbot.api.star import Context, Star, register, StarTools
 from astrbot.api import logger
 from astrbot.api.message_components import Plain, Image
-from astrbot.api.platform import MessageMember
-from astrbot.core.platform.astrbot_message import AstrBotMessage, MessageType
-from astrbot.core.platform.platform_metadata import PlatformMetadata
 from astrbot.core.platform.astr_message_event import AstrMessageEvent
-from astrbot.core.message.message_event_result import MessageEventResult, MessageChain as EventMessageChain
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from datetime import datetime
@@ -20,7 +16,7 @@ import time
 
 from .core.command_trigger import CommandTrigger
 
-@register("astrbot_plugin_reminder", "Foolllll", "支持定时发送消息或执行任务到指定会话，支持cron表达式、富媒体消息", "1.0.0")
+@register("astrbot_plugin_reminder", "Foolllll", "支持在指定会话定时发送消息或执行任务，支持cron表达式、富媒体消息", "1.0.0")
 class ReminderPlugin(Star):
     def __init__(self, context: Context, config: dict = None):
         super().__init__(context)
@@ -35,170 +31,6 @@ class ReminderPlugin(Star):
         self.monitor_timeout = self.config.get('monitor_timeout', 60)
         self._running_triggers = set()
         logger.info("定时提醒插件已加载")
-
-    def _create_async_compatible_mock_bot(self):
-        """创建异步兼容的 Mock Bot，避免其他插件 await 时报错"""
-        class MockAPI:
-            async def call_action(self, action, **params):
-                """异步 call_action 方法"""
-                if action in ["send_private_msg", "send_group_msg"]:
-                    logger.debug(f"Reminder插件：模拟发送消息 action={action}")
-                    return {"message_id": f"mock_{int(time.time())}"}
-                return {}
-
-        class AsyncCompatibleMockBot:
-            async def send(self, *args, **kwargs):
-                """异步 send 方法，避免其他插件 await 时报错"""
-                logger.debug(f"Reminder插件：模拟bot.send调用，参数: {args}")
-                return None  # 异步方法，返回 None 也不会触发 await 错误
-
-            def __init__(self):
-                self._api = MockAPI()
-
-            @property
-            def api(self):
-                return self._api
-
-        return AsyncCompatibleMockBot()
-
-    def _create_timer_event(self, command: str, unified_msg_origin: str, item: Dict):
-        """
-        创建定时任务事件的辅助方法，减少代码重复
-        """
-        parts = unified_msg_origin.split(':')
-        platform_id = parts[0] if parts else 'unknown'
-        is_group = 'GroupMessage' in unified_msg_origin
-        session_id = parts[2] if len(parts) >= 3 else 'unknown'
-        creator_id = item.get('created_by', 'timer')
-        creator_name = 'Timer'
-
-        msg = AstrBotMessage()
-        msg.message_str = command
-        msg.session_id = session_id
-        msg.type = MessageType.GROUP_MESSAGE if is_group else MessageType.FRIEND_MESSAGE
-        msg.self_id = 'timer'
-        msg.message = [Plain(command)]
-        msg.sender = MessageMember(creator_id, creator_name)
-        msg.message_id = f"timer_{int(time.time())}"
-        msg.timestamp = int(time.time())
-        msg.raw_message = {
-            "message": command,
-            "message_type": "group" if is_group else "private",
-            "sender": {"user_id": creator_id, "nickname": creator_name},
-            "self_id": msg.self_id
-        }
-
-        if is_group:
-            msg.group_id = session_id
-
-        platform_type = platform_id
-        meta = PlatformMetadata(platform_type, "timer_task", platform_id)
-
-        event = AstrMessageEvent(
-            message_str=command,
-            message_obj=msg,
-            platform_meta=meta,
-            session_id=session_id
-        )
-
-        event.get_sender_id = lambda: creator_id
-        event.is_admin = lambda: True
-        event.role = 'admin'
-        event._result = MessageEventResult()
-        event.get_result = lambda: event._result
-
-        # 尝试从 context 获取 bot 实例，如果不存在则创建一个模拟对象
-        try:
-            bot_instance = getattr(self.context, 'bot', None)
-            if bot_instance is not None:
-                event.bot = bot_instance
-            else:
-                platform_instance = getattr(self.context, 'platform_manager', None)
-                if platform_instance and hasattr(platform_instance, 'get_platform_by_name'):
-                    current_platform_name = platform_id
-                    platform_inst = platform_instance.get_platform_by_name(current_platform_name)
-                    if platform_inst and hasattr(platform_inst, 'bot'):
-                        event.bot = platform_inst.bot
-                    elif platform_inst and hasattr(platform_inst, 'client'):
-                        event.bot = platform_inst.client
-                    elif platform_inst and hasattr(platform_inst, 'adapter'):
-                        event.bot = platform_inst.adapter
-                    else:
-                        event.bot = self._create_async_compatible_mock_bot()
-                        logger.info("Reminder插件：使用异步兼容的模拟bot实例")
-                else:
-                    possible_bot_attrs = ['qq_bot', 'qq_client', 'tg_bot', 'discord_client', 'slack_client', 'lark_bot', 'wechat_bot']
-                    bot_found = False
-                    for attr_name in possible_bot_attrs:
-                        if hasattr(self.context, attr_name):
-                            event.bot = getattr(self.context, attr_name)
-                            bot_found = True
-                            break
-
-                    if not bot_found:
-                        event.bot = self._create_async_compatible_mock_bot()
-                        logger.info("Reminder插件：使用异步兼容的模拟bot实例")
-        except Exception as bot_error:
-            event.bot = self._create_async_compatible_mock_bot()
-            logger.warning(f"Reminder插件：创建异步兼容模拟bot失败，原因: {bot_error}")
-
-        def set_result(result):
-            if hasattr(result, 'chain'):
-                event._result = result
-            else:
-                msg_result = MessageEventResult()
-                msg_result.chain.append(Plain(str(result)))
-                event._result = msg_result
-
-        event.set_result = set_result
-
-        async def _parse_onebot_json(chain):
-            """OneBot JSON 转换"""
-            result = []
-            for comp in chain.chain:
-                comp_type_name = getattr(comp.type, 'name', 'unknown') if hasattr(comp, 'type') else 'unknown'
-
-                if comp_type_name in ['Plain', 'Text']:
-                    text = getattr(comp, 'text', '')
-                    if text:
-                        result.append({"type": "text", "data": {"text": text}})
-                elif comp_type_name == 'Image':
-                    url = getattr(comp, 'url', '')
-                    file = getattr(comp, 'file', '')
-                    if url:
-                        result.append({"type": "image", "data": {"file": url}})
-                    elif file:
-                        result.append({"type": "image", "data": {"file": file}})
-                elif comp_type_name == 'At':
-                    qq = getattr(comp, 'qq', '')
-                    name = getattr(comp, 'name', '')
-                    if qq:
-                        result.append({"type": "at", "data": {"qq": qq}})
-                elif comp_type_name == 'Face':
-                    face_id = getattr(comp, 'id', '')
-                    if face_id:
-                        result.append({"type": "face", "data": {"id": str(face_id)}})
-                elif comp_type_name == 'Video':
-                    file = getattr(comp, 'file', '')
-                    if file:
-                        result.append({"type": "video", "data": {"file": file}})
-                elif comp_type_name == 'Record':
-                    file = getattr(comp, 'file', '')
-                    if file:
-                        result.append({"type": "record", "data": {"file": file}})
-                elif comp_type_name == 'File':
-                    file = getattr(comp, 'file', '')
-                    if file:
-                        result.append({"type": "file", "data": {"file": file}})
-                elif comp_type_name == 'Json':
-                    data = getattr(comp, 'data', '{}')
-                    if data:
-                        result.append({"type": "json", "data": {"data": data}})
-            return result
-
-        event._parse_onebot_json = _parse_onebot_json
-
-        return event
 
     async def initialize(self):
         """初始化插件，启动调度器"""
