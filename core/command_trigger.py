@@ -190,14 +190,16 @@ class CommandTrigger:
             wait_interval = 0.1   # 每100毫秒检查一次
             waited_time = 0.0
 
+            logger.info(f"开始监控消息捕获，最多等待 {max_wait_time} 秒，检查间隔 {wait_interval} 秒")
+
             while waited_time < max_wait_time:
                 await asyncio.sleep(wait_interval)
                 waited_time += wait_interval
 
-                # 检查是否捕获到了消息
-                if self.captured_messages:
-                    logger.info(f"成功捕获到 {len(self.captured_messages)} 条响应消息")
-                    break
+                # 在配置的时间内持续监控，不管距离上次响应的时间
+                current_message_count = len(self.captured_messages)
+                if current_message_count > 0:
+                    logger.info(f"已捕获到 {current_message_count} 条响应消息，继续监控直到超时...")
 
             # 恢复原始消息发送器
             self.restore_message_sender()
