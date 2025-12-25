@@ -30,6 +30,7 @@ class ReminderPlugin(Star):
         self.reminders: List[Dict] = []
         self.linked_tasks: Dict[str, List[str]] = {}  # {reminder_name: [task_command1, task_command2, ...]}
         self._load_reminders()
+        self.monitor_timeout = self.config.get('monitor_timeout', 60)
         logger.info("定时提醒插件已加载")
 
     def _create_async_compatible_mock_bot(self):
@@ -397,7 +398,7 @@ class ReminderPlugin(Star):
 
             # 改进的等待机制：在2分钟内每100毫秒检查一次是否捕获到消息
             start_time = asyncio.get_event_loop().time()
-            max_wait_time = 120  # 2分钟
+            max_wait_time = self.monitor_timeout  # 使用配置的监控超时时间
             check_interval = 0.1  # 100毫秒
             last_message_count = 0
             no_new_message_duration = 0  # 没有新消息的时间（秒）
