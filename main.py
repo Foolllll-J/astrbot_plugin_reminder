@@ -18,7 +18,7 @@ import shutil
 import asyncio
 import time
 
-@register("astrbot_plugin_reminder", "Foolllll", "定时提醒插件，支持cron表达式和图片消息", "0.1.0")
+@register("astrbot_plugin_reminder", "Foolllll", "支持定时发送消息或执行任务到指定会话，支持cron表达式、富媒体消息", "1.0.0")
 class ReminderPlugin(Star):
     def __init__(self, context: Context, config: dict = None):
         super().__init__(context)
@@ -413,7 +413,7 @@ class ReminderPlugin(Star):
                 else:
                     no_new_message_duration += check_interval
 
-                
+
                 await asyncio.sleep(check_interval)
 
             total_wait_time = asyncio.get_event_loop().time() - start_time
@@ -837,7 +837,7 @@ class ReminderPlugin(Star):
                 yield event.plain_result(f"❌ 未找到名为 '{item_name}' 的{item_type}\n\n💡 使用 /查看{'任务' if show_tasks else '提醒'} 查看所有{item_type}列表")
                 return
 
-            # 构建消息链：先添加属性信息
+            # 构建消息链：添加基本属性信息
             chain = []
 
             # 格式化目标显示
@@ -865,19 +865,12 @@ class ReminderPlugin(Star):
                 # 提醒显示内容
                 info_text += f"\n📝 提醒内容:\n"
 
-                # 显示链接的任务
-                reminder_name = target_item['name']
-                if reminder_name in self.linked_tasks and self.linked_tasks[reminder_name]:
-                    linked_commands = self.linked_tasks[reminder_name]
-                    info_text += f"\n🔗 链接任务 ({len(linked_commands)}个):\n"
-                    for i, cmd in enumerate(linked_commands, 1):
-                        info_text += f"  {i}. {cmd}\n"
-
             chain.append(Plain(info_text))
 
             # 按照原始顺序构建内容
             if not target_item.get('is_task', False):
                 # 只有提醒才显示消息结构
+                # 显示提醒内容
                 for item in target_item['message_structure']:
                     if item['type'] == 'text':
                         chain.append(Plain(item['content']))
@@ -892,6 +885,16 @@ class ReminderPlugin(Star):
             message_chain = MessageChain()
             message_chain.chain = chain
             yield event.chain_result(message_chain.chain)
+
+            # 如果是提醒且存在链接的任务，则单独发送链接任务信息
+            if not target_item.get('is_task', False):
+                reminder_name = target_item['name']
+                if reminder_name in self.linked_tasks and self.linked_tasks[reminder_name]:
+                    linked_commands = self.linked_tasks[reminder_name]
+                    linked_info = f"🔗 {target_item['name']} 已链接的任务:\n"
+                    for i, cmd in enumerate(linked_commands, 1):
+                        linked_info += f"  {i}. {cmd}\n"
+                    yield event.plain_result(linked_info)
 
         else:
             # 显示所有项列表（简略信息）
