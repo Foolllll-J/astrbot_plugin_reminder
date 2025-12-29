@@ -3,6 +3,7 @@ from astrbot.api.star import Context, Star, register, StarTools
 from astrbot.api import logger
 from astrbot.api.message_components import Plain, Image
 from astrbot.core.platform.astr_message_event import AstrMessageEvent
+from astrbot.core.platform.astrbot_message import MessageType
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from datetime import datetime
@@ -16,7 +17,7 @@ import time
 
 from .core.command_trigger import CommandTrigger
 
-@register("astrbot_plugin_reminder", "Foolllll", "支持在指定会话定时发送消息或执行任务，支持cron表达式、富媒体消息", "1.0.1")
+@register("astrbot_plugin_reminder", "Foolllll", "支持在指定会话定时发送消息或执行任务，支持cron表达式、富媒体消息", "1.0.2")
 class ReminderPlugin(Star):
     def __init__(self, context: Context, config: dict = None):
         super().__init__(context)
@@ -269,7 +270,19 @@ class ReminderPlugin(Star):
                     return
             else:
                 # 格式1：使用当前会话
-                unified_msg_origin = event.unified_msg_origin
+                current_origin = event.unified_msg_origin
+                if event.get_message_type() == MessageType.GROUP_MESSAGE:
+                    # 如果是群聊，确保 origin 包含 GroupMessage 标识
+                    if ":" in current_origin:
+                        parts = current_origin.split(":", 1)
+                        if len(parts) == 2 and "GroupMessage" not in current_origin and "FriendMessage" not in current_origin:
+                            unified_msg_origin = f"{parts[0]}:GroupMessage:{parts[1]}"
+                        else:
+                            unified_msg_origin = current_origin
+                    else:
+                        unified_msg_origin = current_origin
+                else:
+                    unified_msg_origin = current_origin
                 logger.info(f"使用当前会话ID: {unified_msg_origin}")
 
             # 解析cron表达式（需要5段）
@@ -407,7 +420,8 @@ class ReminderPlugin(Star):
                 'cron': cron_expr,
                 'is_task': is_task,
                 'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-                'created_by': event.get_sender_id()
+                'created_by': event.get_sender_id(),
+                'creator_name': event.get_sender_name() # 记录创建者昵称
             }
 
             if is_task:
@@ -698,8 +712,9 @@ class ReminderPlugin(Star):
             yield event.plain_result(f"✅ 已删除{item_type}: {item_to_delete['name']}")
 
         except Exception as e:
-            logger.error(f"删除{delete_tasks if '任务' else '提醒'}失败: {e}")
-            yield event.plain_result(f"删除{delete_tasks if '任务' else '提醒'}失败: {e}")
+            item_type = "任务" if delete_tasks else "提醒"
+            logger.error(f"删除{item_type}失败: {e}")
+            yield event.plain_result(f"删除{item_type}失败: {e}")
 
     @filter.command("删除任务")
     async def delete_task(self, event: AstrMessageEvent, index: int = None):

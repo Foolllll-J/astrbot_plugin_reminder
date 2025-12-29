@@ -50,21 +50,36 @@ class EventFactory:
         # 添加调试日志
         logger.info(f"create_event: platform_id={platform_id}, unified_msg_origin={unified_msg_origin}")
 
-        # 创建基础消息对象
-        msg = self._create_message_object(command, session_id, message_type, creator_id, creator_name, platform_id)
+        # 获取平台实例 - 使用原始的platform_id（如"本地"）
+        platform_instance = self._get_platform_instance(platform_id)
 
         # 获取真实的平台类型
-        platform_type = self._get_platform_type_from_origin(unified_msg_origin)
+        platform_type = self._get_platform_type_from_instance(platform_instance, unified_msg_origin)
         logger.info(f"create_event: 获取到的平台类型={platform_type}")
+
+        # 创建基础消息对象
+        msg = self._create_message_object(command, session_id, message_type, creator_id, creator_name, platform_instance)
 
         # 创建平台元数据，使用真实的平台类型，但ID保持原始值
         meta = PlatformMetadata(platform_type, "command_trigger", platform_id)
 
-        # 获取平台实例 - 使用原始的platform_id（如"本地"）而不是平台类型
-        platform_instance = self._get_platform_instance(platform_id)
-
         # 根据平台类型创建正确的事件对象
         return self._create_platform_specific_event(platform_type, command, msg, meta, session_id, platform_instance)
+
+    def _get_platform_type_from_instance(self, platform_instance, unified_msg_origin: str) -> str:
+        """优先从平台实例获取类型，否则从origin解析"""
+        if platform_instance:
+            try:
+                # 尝试从平台实例的元数据获取类型
+                if hasattr(platform_instance, 'meta'):
+                    meta = platform_instance.meta()
+                    if hasattr(meta, 'name'):
+                        return meta.name
+            except Exception as e:
+                logger.warning(f"从平台实例获取类型失败: {e}")
+
+        # 回退到基于字符串的判断
+        return self._get_platform_type_from_origin(unified_msg_origin)
 
     def _get_platform_type_from_origin(self, unified_msg_origin: str) -> str:
         """从unified_msg_origin中获取平台类型"""
@@ -103,17 +118,12 @@ class EventFactory:
         return "123456789"
 
     def _create_message_object(self, command: str, session_id: str, message_type: MessageType,
-                              creator_id: str, creator_name: str = None, platform_id: str = None) -> AstrBotMessage:
+                              creator_id: str, creator_name: str = None, platform_instance=None) -> AstrBotMessage:
         """创建消息对象"""
         msg = AstrBotMessage()
         msg.message_str = command
         msg.session_id = session_id
         msg.type = message_type
-
-        # 尝试获取真实的self_id
-        platform_instance = None
-        if platform_id:
-            platform_instance = self._get_platform_instance(platform_id)
 
         # 使用同步方法获取真实的机器人ID
         real_self_id = self._get_real_self_id_sync(platform_instance)
@@ -142,10 +152,14 @@ class EventFactory:
         # 设置raw_message属性（模拟原始消息对象）
         msg.raw_message = {
             "message": command,
-            "message_type": message_type.value,
+            "message_type": "group" if message_type == MessageType.GROUP_MESSAGE else "private",
             "sender": {"user_id": creator_id, "nickname": creator_name or "用户"},
             "self_id": msg.self_id  # 使用获取到的真实self_id
         }
+        
+        # 如果是群聊，在 raw_message 中添加 group_id
+        if message_type == MessageType.GROUP_MESSAGE:
+            msg.raw_message["group_id"] = msg.group_id
 
         return msg
 
