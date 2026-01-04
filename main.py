@@ -9,6 +9,7 @@ from apscheduler.triggers.cron import CronTrigger
 from datetime import datetime
 import json
 import os
+import re
 from typing import Dict, List
 import aiohttp
 import shutil
@@ -17,7 +18,7 @@ import time
 
 from .core.command_trigger import CommandTrigger
 
-@register("astrbot_plugin_reminder", "Foolllll", "支持在指定会话定时发送消息或执行任务，支持cron表达式、富媒体消息", "1.0.2")
+@register("astrbot_plugin_reminder", "Foolllll", "支持在指定会话定时发送消息或执行任务，支持cron表达式、富媒体消息", "1.0.3")
 class ReminderPlugin(Star):
     def __init__(self, context: Context, config: dict = None):
         super().__init__(context)
@@ -38,6 +39,31 @@ class ReminderPlugin(Star):
         self._restore_reminders()
         self.scheduler.start()
         logger.info(f"定时提醒插件启动成功，已加载 {len(self.reminders)} 个提醒任务")
+
+    def _translate_to_apscheduler_cron(self, cron_expr: str) -> str:
+        """
+        将标准 cron 表达式 (0-7, 0/7=Sun) 转换为 APScheduler 格式 (0-6, 0=Mon, 6=Sun)
+        通过将数字映射为英文缩写 (mon, tue...) 来实现兼容
+        """
+        parts = cron_expr.split()
+        if len(parts) != 5:
+            return cron_expr
+        
+        minute, hour, day, month, dow = parts
+        
+        # 标准映射: 0=Sun, 1=Mon, ..., 6=Sat, 7=Sun
+        mapping = {
+            '0': 'sun', '1': 'mon', '2': 'tue', '3': 'wed', 
+            '4': 'thu', '5': 'fri', '6': 'sat', '7': 'sun'
+        }
+        
+        def replace_func(match):
+            val = match.group(0)
+            return mapping.get(val, val)
+        
+        # 仅替换星期字段中的数字
+        new_dow = re.sub(r'\d+', replace_func, dow)
+        return f"{minute} {hour} {day} {month} {new_dow}"
 
     def _load_reminders(self):
         """从文件加载提醒数据"""
@@ -96,12 +122,10 @@ class ReminderPlugin(Star):
         """添加任务到调度器"""
         job_id = item['id']
         cron_expr = item['cron']
+        
+        # 转换为 APScheduler 兼容格式
+        aps_cron = self._translate_to_apscheduler_cron(cron_expr)
 
-        parts = cron_expr.split()
-        if len(parts) != 5:
-            raise ValueError(f"无效的cron表达式: {cron_expr}")
-
-        minute, hour, day, month, day_of_week = parts
         if item.get('is_task', False):
             job_func = self._execute_task
         else:
@@ -109,13 +133,7 @@ class ReminderPlugin(Star):
 
         self.scheduler.add_job(
             job_func,
-            CronTrigger(
-                minute=minute,
-                hour=hour,
-                day=day,
-                month=month,
-                day_of_week=day_of_week
-            ),
+            CronTrigger.from_crontab(aps_cron),
             args=[item],
             id=job_id,
             replace_existing=True
@@ -302,7 +320,7 @@ class ReminderPlugin(Star):
             cleaned_last_part = ''
 
             for i, char in enumerate(last_part):
-                if char in '0123456789*-,/':
+                if char.isalnum() or char in '*-,/':
                     if char.isdigit():
                         digit_count = 1
                         for j in range(i + 1, min(i + 10, len(last_part))):
@@ -326,6 +344,9 @@ class ReminderPlugin(Star):
             cron_parts[4] = cleaned_last_part
             cron_expr = ' '.join(cron_parts)
 
+            # 转换为 APScheduler 兼容格式进行验证
+            aps_cron = self._translate_to_apscheduler_cron(cron_expr)
+
             content_text = ""
             if len(remaining_parts) > 5:
                 content_text = remaining_parts[5]
@@ -336,7 +357,7 @@ class ReminderPlugin(Star):
 
             # 验证cron表达式
             try:
-                CronTrigger.from_crontab(cron_expr)
+                CronTrigger.from_crontab(aps_cron)
             except Exception as e:
                 logger.error(f"cron表达式验证失败: {e}")
                 yield event.plain_result(f"cron表达式无效: {e}")

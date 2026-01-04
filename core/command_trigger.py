@@ -63,6 +63,11 @@ class CommandTrigger:
                 if chain and hasattr(chain, 'chain') and chain.chain:
                     logger.info(f"[拦截成功] {source_info} -> 正在转发: {command}")
                     self.captured_messages.append(chain)
+                    
+                    # 确保转发时携带正确的 Bot self_id
+                    if not hasattr(chain, 'self_id') or not chain.self_id:
+                        chain.self_id = getattr(event, 'self_id', None)
+                    
                     await self.context.send_message(target_dest, chain)
             except Exception:
                 logger.error(f"[转发失败] {source_info} 发生异常:\n{traceback.format_exc()}")

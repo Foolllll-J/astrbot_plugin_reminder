@@ -48,14 +48,14 @@ class EventFactory:
                     message_type = MessageType.FRIEND_MESSAGE
 
         # 添加调试日志
-        logger.info(f"create_event: platform_id={platform_id}, unified_msg_origin={unified_msg_origin}")
+        logger.debug(f"create_event: platform_id={platform_id}, unified_msg_origin={unified_msg_origin}")
 
         # 获取平台实例 - 使用原始的platform_id（如"本地"）
         platform_instance = self._get_platform_instance(platform_id)
 
         # 获取真实的平台类型
         platform_type = self._get_platform_type_from_instance(platform_instance, unified_msg_origin)
-        logger.info(f"create_event: 获取到的平台类型={platform_type}")
+        logger.debug(f"create_event: 获取到的平台类型={platform_type}")
 
         # 创建基础消息对象
         msg = self._create_message_object(command, session_id, message_type, creator_id, creator_name, platform_instance)
@@ -64,7 +64,12 @@ class EventFactory:
         meta = PlatformMetadata(platform_type, "command_trigger", platform_id)
 
         # 根据平台类型创建正确的事件对象
-        return self._create_platform_specific_event(platform_type, command, msg, meta, session_id, platform_instance)
+        event = self._create_platform_specific_event(platform_type, command, msg, meta, session_id, platform_instance)
+        event.is_admin = lambda: True
+        event.get_sender_id = lambda: creator_id
+        event.get_sender_name = lambda: creator_name or "用户"
+        
+        return event
 
     def _get_platform_type_from_instance(self, platform_instance, unified_msg_origin: str) -> str:
         """优先从平台实例获取类型，否则从origin解析"""
@@ -104,17 +109,18 @@ class EventFactory:
         """
         同步方式获取真实的机器人ID
         """
-        try:
-            # 如果平台实例有缓存的ID
-            if hasattr(platform_instance, '_cached_qq_id'):
-                cached_id = getattr(platform_instance, '_cached_qq_id')
-                if cached_id and cached_id != "123456789":
-                    return str(cached_id)
-        except Exception as e:
-            logger.warning(f"获取缓存ID时出错: {e}")
+        if not platform_instance:
+            return "123456789"
 
-        # 如果没有缓存，返回默认值
-        logger.info("使用默认机器人ID以确保稳定性")
+        try:
+            # 仅使用 client_self_id
+            if hasattr(platform_instance, 'client_self_id'):
+                val = getattr(platform_instance, 'client_self_id')
+                if val and isinstance(val, (str, int)):
+                    return str(val)
+        except Exception as e:
+            logger.debug(f"获取机器人ID时发生异常: {e}")
+
         return "123456789"
 
     def _create_message_object(self, command: str, session_id: str, message_type: MessageType,
@@ -128,13 +134,13 @@ class EventFactory:
         # 使用同步方法获取真实的机器人ID
         real_self_id = self._get_real_self_id_sync(platform_instance)
         msg.self_id = real_self_id
-        logger.info(f"使用机器人ID: {msg.self_id}")
+        logger.debug(f"使用机器人ID: {msg.self_id}")
 
         msg.message_id = "command_trigger_" + str(int(time.time()))
 
         # 设置发送者信息
         from astrbot.api.platform import MessageMember
-        msg.sender = MessageMember(creator_id, creator_name or "用户")
+        msg.sender = MessageMember(user_id=creator_id, nickname=creator_name or "用户")
 
         # 设置群组ID（如果是群聊）
         if message_type == MessageType.GROUP_MESSAGE:
@@ -154,7 +160,7 @@ class EventFactory:
             "message": command,
             "message_type": "group" if message_type == MessageType.GROUP_MESSAGE else "private",
             "sender": {"user_id": creator_id, "nickname": creator_name or "用户"},
-            "self_id": msg.self_id  # 使用获取到的真实self_id
+            "self_id": msg.self_id
         }
         
         # 如果是群聊，在 raw_message 中添加 group_id
@@ -193,7 +199,7 @@ class EventFactory:
         """创建 aiocqhttp 平台事件"""
         try:
             platform = self._get_platform_instance(meta.id)  # 使用平台ID而不是平台类型
-            logger.info(f"_create_aiocqhttp_event: 尝试获取平台实例，platform_id={meta.id}")
+            logger.debug(f"_create_aiocqhttp_event: 尝试获取平台实例，platform_id={meta.id}")
             if platform and hasattr(platform, 'bot'):
                 from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import AiocqhttpMessageEvent
                 event = AiocqhttpMessageEvent(
@@ -205,7 +211,7 @@ class EventFactory:
                 )
                 # 确保事件对象有正确的平台实例引用
                 event.platform_instance = platform
-                logger.info(f"成功创建 AiocqhttpMessageEvent，平台ID: {meta.name}")
+                logger.debug(f"成功创建 AiocqhttpMessageEvent，平台ID: {meta.name}")
                 return event
         except Exception as e:
             logger.warning(f"创建 AiocqhttpMessageEvent 失败: {e}")
