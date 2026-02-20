@@ -1,7 +1,7 @@
 from astrbot.api.event import filter, AstrMessageEvent, MessageChain
 from astrbot.api.star import Context, Star, register, StarTools
 from astrbot.api import logger
-from astrbot.api.message_components import Plain, Image
+from astrbot.api.message_components import Plain, Image, At, Face
 from astrbot.core.platform.astr_message_event import AstrMessageEvent
 from astrbot.core.platform.astrbot_message import MessageType
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -94,14 +94,19 @@ class ReminderPlugin(Star):
                 raw_reminders = data.get('reminders', [])
                 raw_linked_tasks = data.get('linked_tasks', {})
 
-            normalized_linked_tasks: Dict[str, List[str]] = {}
+            normalized_linked_tasks: Dict[str, List[Dict]] = {}
             for reminder_name, task_data in raw_linked_tasks.items():
+                commands_list = []
                 if isinstance(task_data, str):
-                    normalized_linked_tasks[reminder_name] = [task_data]
+                    commands_list.append({'command': task_data, 'message_structure': []})
                 elif isinstance(task_data, list):
-                    normalized_linked_tasks[reminder_name] = task_data
-                else:
-                    normalized_linked_tasks[reminder_name] = []
+                    for cmd in task_data:
+                        if isinstance(cmd, str):
+                            commands_list.append({'command': cmd, 'message_structure': []})
+                        elif isinstance(cmd, dict):
+                            commands_list.append(cmd)
+                
+                normalized_linked_tasks[reminder_name] = commands_list
 
             name_map: Dict[str, str] = {}
             existing_names = set()
@@ -150,7 +155,7 @@ class ReminderPlugin(Star):
 
                 self.reminders.append(item)
 
-            migrated_linked_tasks: Dict[str, List[str]] = {}
+            migrated_linked_tasks: Dict[str, List[Dict]] = {}
             for old_name, commands in normalized_linked_tasks.items():
                 new_name = name_map.get(old_name, old_name)
                 if new_name not in migrated_linked_tasks:
@@ -268,6 +273,10 @@ class ReminderPlugin(Star):
                         chain.append(Image.fromFileSystem(full_path))
                     else:
                         logger.warning(f"图片文件不存在: {full_path}")
+                elif msg_item['type'] == 'at':
+                    chain.append(At(qq=msg_item['qq']))
+                elif msg_item['type'] == 'face':
+                    chain.append(Face(id=msg_item['id']))
 
             if not chain:
                 logger.warning(f"提醒消息为空: {item['name']}")
@@ -294,19 +303,22 @@ class ReminderPlugin(Star):
             logger.error(f"发送提醒失败: {item.get('name', 'unknown')}, {e}", exc_info=True)
 
 
-    async def _execute_command_common(self, command: str, unified_msg_origin: str, item: Dict, task_type: str = "task"):
+    async def _execute_command_common(self, command: str, unified_msg_origin: str, item: Dict, task_type: str = "task", original_components: list = None, is_admin: bool = True, self_id: str = None):
         """执行命令的通用方法，用于任务和链接任务
         Args:
             command: 要执行的命令
             unified_msg_origin: 消息发送的目标
             item: 任务或提醒的配置项
             task_type: 任务类型，"task" 或 "linked_command"
+            original_components: 原始消息中的非文本组件
+            is_admin: 是否以管理员权限执行
+            self_id: 机器人 ID
         """
         logger.info(f"检测到{task_type}，执行: {command}")
         trigger = CommandTrigger(self.context, {"monitor_timeout": self.monitor_timeout})
         
         # 创建任务并记录
-        task = asyncio.create_task(trigger.trigger_and_forward_command(unified_msg_origin, item, command))
+        task = asyncio.create_task(trigger.trigger_and_forward_command(unified_msg_origin, item, command, is_admin=is_admin, original_components=original_components, self_id=self_id))
         self._running_triggers.add(task)
         
         try:
@@ -317,9 +329,28 @@ class ReminderPlugin(Star):
         finally:
             self._running_triggers.discard(task) # 任务结束移除记录
         
-    async def _execute_linked_command(self, linked_command: str, unified_msg_origin: str, item: Dict):
+    async def _execute_linked_command(self, linked_task_data: str | Dict, unified_msg_origin: str, item: Dict):
         """执行单个链接任务"""
-        await self._execute_command_common(linked_command, unified_msg_origin, item, "链接任务")
+        is_admin = item.get('is_admin', True)
+        self_id = item.get('self_id')
+        
+        command = ""
+        original_components = []
+        
+        if isinstance(linked_task_data, str):
+            command = linked_task_data
+        elif isinstance(linked_task_data, dict):
+            command = linked_task_data.get('command', '')
+            # 还原组件
+            if 'message_structure' in linked_task_data:
+                for comp in linked_task_data['message_structure']:
+                    if comp['type'] == 'at':
+                        original_components.append(At(qq=comp['qq']))
+                    elif comp['type'] == 'face':
+                        original_components.append(Face(id=comp['id']))
+        
+        if command:
+            await self._execute_command_common(command, unified_msg_origin, item, "链接任务", original_components=original_components, is_admin=is_admin, self_id=self_id)
 
     async def _execute_task(self, item: Dict, session: str):
         """执行定时任务"""
@@ -336,7 +367,48 @@ class ReminderPlugin(Star):
 
             logger.info(f"执行任务指令: {command} -> {unified_msg_origin}")
 
-            await self._execute_command_common(command, unified_msg_origin, item, "任务")
+            # 还原组件
+            # 优先使用 message_structure 还原完整的命令和组件结构，避免 command 字段包含非指令文本
+            original_components = []
+            final_command = command
+
+            if 'message_structure' in item and item['message_structure']:
+                components_list = []
+                temp_text = ""
+                
+                # 构建完整的组件列表
+                for comp in item['message_structure']:
+                    if comp['type'] == 'text':
+                        temp_text += comp['content']
+                        components_list.append(Plain(comp['content']))
+                    elif comp['type'] == 'at':
+                        components_list.append(At(qq=comp['qq']))
+                    elif comp['type'] == 'face':
+                        components_list.append(Face(id=comp['id']))
+                    elif comp['type'] == 'image':
+                        # 任务通常不处理图片作为指令一部分，但保留以防万一
+                        pass
+                
+                if temp_text:
+                    final_command = temp_text.strip()
+                
+                # 如果 components_list 包含 Plain，则将其用作 original_components
+                if components_list:
+                    original_components = components_list
+            else:
+                # 兼容旧数据
+                if 'message_structure' in item:
+                    for comp in item['message_structure']:
+                        if comp['type'] == 'at':
+                            original_components.append(At(qq=comp['qq']))
+
+            # 获取创建者权限状态
+            is_admin = item.get('is_admin', True)
+            
+            # 获取记录的 self_id
+            self_id = item.get('self_id')
+
+            await self._execute_command_common(final_command, unified_msg_origin, item, "任务", original_components=original_components, is_admin=is_admin, self_id=self_id)
         except Exception as e:
             logger.error(f"执行任务失败: {item.get('name', 'unknown')}, {e}", exc_info=True)
 
@@ -493,70 +565,82 @@ class ReminderPlugin(Star):
                 yield event.plain_result(f"cron表达式无效: {e}")
                 return
 
+            # 提取完整的消息结构（图文混排/组件）
+            message_structure = []
+            message_chain = event.get_messages()
+            cron_found = False
+
+            for msg_comp in message_chain:
+                if isinstance(msg_comp, Plain):
+                    if not cron_found and cron_expr in msg_comp.text:
+                        # 找到了 cron 表达式
+                        cron_index = msg_comp.text.index(cron_expr)
+                        cron_end = cron_index + len(cron_expr)
+
+                        # 提取 cron 之后的文本
+                        content = msg_comp.text[cron_end:]
+                        cron_found = True
+
+                        if content.strip():
+                            message_structure.append({
+                                "type": "text",
+                                "content": content
+                            })
+                    elif cron_found:
+                        # 已经找到 cron，后续文本直接添加
+                        if msg_comp.text.strip():
+                            message_structure.append({
+                                "type": "text",
+                                "content": msg_comp.text
+                            })
+                
+                elif isinstance(msg_comp, At):
+                    if cron_found:
+                        message_structure.append({
+                            "type": "at",
+                            "qq": msg_comp.qq
+                        })
+
+                elif isinstance(msg_comp, Face):
+                    if cron_found:
+                        message_structure.append({
+                            "type": "face",
+                            "id": msg_comp.id
+                        })
+
+                elif isinstance(msg_comp, Image):
+                    # 图片只在找到 cron 之后添加
+                    if cron_found:
+                        img_filename = f"img_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}.jpg"
+                        img_path = os.path.join(self.data_dir, img_filename)
+
+                        try:
+                            saved = False
+                            if msg_comp.url:
+                                async with aiohttp.ClientSession() as session:
+                                    async with session.get(msg_comp.url) as resp:
+                                        if resp.status == 200:
+                                            with open(img_path, 'wb') as f:
+                                                f.write(await resp.read())
+                                            saved = True
+                            elif msg_comp.file:
+                                shutil.copy(msg_comp.file, img_path)
+                                saved = True
+
+                            if saved:
+                                message_structure.append({
+                                    "type": "image",
+                                    "path": img_filename
+                                })
+                        except Exception as e:
+                            logger.error(f"保存图片失败: {e}")
+
             # 根据是否是任务验证内容
             if is_task:
                 if not content_text:
                     yield event.plain_result(f"❌ 任务指令不能为空")
                     return
             else:
-                # 提取完整的消息结构（图文混排）- 仅提醒需要
-                message_structure = []
-                message_chain = event.get_messages()
-
-                # 遍历消息链，在 Plain 中找到 cron 表达式的结束位置
-                cron_found = False
-
-                for msg_comp in message_chain:
-                    if isinstance(msg_comp, Plain):
-                        if not cron_found and cron_expr in msg_comp.text:
-                            # 找到了 cron 表达式
-                            cron_index = msg_comp.text.index(cron_expr)
-                            cron_end = cron_index + len(cron_expr)
-
-                            # 提取 cron 之后的文本
-                            content = msg_comp.text[cron_end:]
-                            cron_found = True
-
-                            if content.strip():
-                                message_structure.append({
-                                    "type": "text",
-                                    "content": content
-                                })
-                        elif cron_found:
-                            # 已经找到 cron，后续文本直接添加
-                            if msg_comp.text.strip():
-                                message_structure.append({
-                                    "type": "text",
-                                    "content": msg_comp.text
-                                })
-
-                    elif isinstance(msg_comp, Image):
-                        # 图片只在找到 cron 之后添加
-                        if cron_found:
-                            img_filename = f"img_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}.jpg"
-                            img_path = os.path.join(self.data_dir, img_filename)
-
-                            try:
-                                saved = False
-                                if msg_comp.url:
-                                    async with aiohttp.ClientSession() as session:
-                                        async with session.get(msg_comp.url) as resp:
-                                            if resp.status == 200:
-                                                with open(img_path, 'wb') as f:
-                                                    f.write(await resp.read())
-                                                saved = True
-                                elif msg_comp.file:
-                                    shutil.copy(msg_comp.file, img_path)
-                                    saved = True
-
-                                if saved:
-                                    message_structure.append({
-                                        "type": "image",
-                                        "path": img_filename
-                                    })
-                            except Exception as e:
-                                logger.error(f"保存图片失败: {e}")
-
                 # 验证至少有消息内容
                 if not message_structure:
                     yield event.plain_result("提醒内容不能为空，请至少提供文字或图片")
@@ -564,6 +648,14 @@ class ReminderPlugin(Star):
 
             # 创建对象
             item_id = f"{'task' if is_task else 'reminder'}_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{len(self.reminders)}"
+            
+            # 获取 self_id
+            self_id = None
+            if hasattr(event, 'message_obj') and hasattr(event.message_obj, 'self_id'):
+                self_id = str(event.message_obj.self_id)
+            elif hasattr(event, 'self_id'): # 兼容性处理
+                 self_id = str(event.self_id)
+
             item = {
                 'id': item_id,
                 'name': name,
@@ -572,11 +664,14 @@ class ReminderPlugin(Star):
                 'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
                 'created_by': event.get_sender_id(),
                 'creator_name': event.get_sender_name(), # 记录创建者昵称
+                'is_admin': event.is_admin(), # 记录创建者是否为管理员
+                'self_id': self_id, # 记录 bot 的 self_id
                 'enabled_sessions': [unified_msg_origin]
             }
 
             if is_task:
                 item['command'] = content_text
+                item['message_structure'] = message_structure # 保存任务的组件结构
             else:
                 item['message_structure'] = message_structure  # 保存完整的消息结构
 
@@ -606,12 +701,18 @@ class ReminderPlugin(Star):
                 # 统计消息内容
                 text_count = sum(1 for item in message_structure if item['type'] == 'text')
                 image_count = sum(1 for item in message_structure if item['type'] == 'image')
+                face_count = sum(1 for item in message_structure if item['type'] == 'face')
+                at_count = sum(1 for item in message_structure if item['type'] == 'at')
 
                 result_msg = f"✅ {command_name}已添加！\n名称: {name}\n目标: {target_desc}\ncron: {cron_expr}"
                 if text_count > 0:
                     result_msg += f"\n文字: {text_count}段"
                 if image_count > 0:
                     result_msg += f"\n图片: {image_count}张"
+                if face_count > 0:
+                    result_msg += f"\n表情: {face_count}个"
+                if at_count > 0:
+                    result_msg += f"\nAt: {at_count}人"
 
             logger.info(f"成功添加{command_name}: {name}, unified_msg_origin: {unified_msg_origin}, cron: {cron_expr}")
             yield event.plain_result(result_msg)
@@ -706,62 +807,78 @@ class ReminderPlugin(Star):
                 yield event.plain_result(f"cron表达式无效: {e}")
                 return
 
+            # 提取完整的消息结构（图文混排/组件）
+            message_structure = []
+            message_chain = event.get_messages()
+            cron_found = False
+
+            for msg_comp in message_chain:
+                if isinstance(msg_comp, Plain):
+                    if not cron_found and cron_expr in msg_comp.text:
+                        cron_index = msg_comp.text.index(cron_expr)
+                        cron_end = cron_index + len(cron_expr)
+                        content = msg_comp.text[cron_end:]
+                        cron_found = True
+
+                        if content.strip():
+                            message_structure.append({
+                                "type": "text",
+                                "content": content
+                            })
+                    elif cron_found:
+                        if msg_comp.text.strip():
+                            message_structure.append({
+                                "type": "text",
+                                "content": msg_comp.text
+                            })
+                
+                elif isinstance(msg_comp, At):
+                    if cron_found:
+                        message_structure.append({
+                            "type": "at",
+                            "qq": msg_comp.qq
+                        })
+
+                elif isinstance(msg_comp, Face):
+                    if cron_found:
+                        message_structure.append({
+                            "type": "face",
+                            "id": msg_comp.id
+                        })
+
+                elif isinstance(msg_comp, Image):
+                    if cron_found:
+                        img_filename = f"img_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}.jpg"
+                        img_path = os.path.join(self.data_dir, img_filename)
+
+                        try:
+                            saved = False
+                            if msg_comp.url:
+                                async with aiohttp.ClientSession() as session:
+                                    async with session.get(msg_comp.url) as resp:
+                                        if resp.status == 200:
+                                            with open(img_path, 'wb') as f:
+                                                f.write(await resp.read())
+                                            saved = True
+                            elif msg_comp.file:
+                                shutil.copy(msg_comp.file, img_path)
+                                saved = True
+
+                            if saved:
+                                message_structure.append({
+                                    "type": "image",
+                                    "path": img_filename
+                                })
+                        except Exception as e:
+                            logger.error(f"保存图片失败: {e}")
+
             if is_task:
                 if not content_text:
                     yield event.plain_result(f"❌ 任务指令不能为空")
                     return
                 target_item['command'] = content_text
+                target_item['message_structure'] = message_structure
             else:
-                message_structure = []
-                message_chain = event.get_messages()
-                cron_found = False
-
-                for msg_comp in message_chain:
-                    if isinstance(msg_comp, Plain):
-                        if not cron_found and cron_expr in msg_comp.text:
-                            cron_index = msg_comp.text.index(cron_expr)
-                            cron_end = cron_index + len(cron_expr)
-                            content = msg_comp.text[cron_end:]
-                            cron_found = True
-
-                            if content.strip():
-                                message_structure.append({
-                                    "type": "text",
-                                    "content": content
-                                })
-                        elif cron_found:
-                            if msg_comp.text.strip():
-                                message_structure.append({
-                                    "type": "text",
-                                    "content": msg_comp.text
-                                })
-
-                    elif isinstance(msg_comp, Image):
-                        if cron_found:
-                            img_filename = f"img_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}.jpg"
-                            img_path = os.path.join(self.data_dir, img_filename)
-
-                            try:
-                                saved = False
-                                if msg_comp.url:
-                                    async with aiohttp.ClientSession() as session:
-                                        async with session.get(msg_comp.url) as resp:
-                                            if resp.status == 200:
-                                                with open(img_path, 'wb') as f:
-                                                    f.write(await resp.read())
-                                                saved = True
-                                elif msg_comp.file:
-                                    shutil.copy(msg_comp.file, img_path)
-                                    saved = True
-
-                                if saved:
-                                    message_structure.append({
-                                        "type": "image",
-                                        "path": img_filename
-                                    })
-                            except Exception as e:
-                                logger.error(f"保存图片失败: {e}")
-
                 if not message_structure:
                     yield event.plain_result("提醒内容不能为空，请至少提供文字或图片")
                     return
@@ -769,6 +886,11 @@ class ReminderPlugin(Star):
                 target_item['message_structure'] = message_structure
 
             target_item['cron'] = cron_expr
+            
+            # 更新创建者信息和权限（编辑者即为新的创建者/负责人）
+            target_item['created_by'] = event.get_sender_id()
+            target_item['creator_name'] = event.get_sender_name()
+            target_item['is_admin'] = event.is_admin()
 
             sessions = list(target_item.get('enabled_sessions', []))
             self._remove_all_jobs_for_item(target_item)
@@ -789,6 +911,8 @@ class ReminderPlugin(Star):
             else:
                 text_count = sum(1 for x in target_item['message_structure'] if x['type'] == 'text')
                 image_count = sum(1 for x in target_item['message_structure'] if x['type'] == 'image')
+                face_count = sum(1 for x in target_item['message_structure'] if x['type'] == 'face')
+                at_count = sum(1 for x in target_item['message_structure'] if x['type'] == 'at')
                 session_count = len(sessions)
                 msg = (
                     f"✅ {command_name}已编辑！\n"
@@ -799,6 +923,10 @@ class ReminderPlugin(Star):
                     msg += f"\n文字: {text_count}段"
                 if image_count > 0:
                     msg += f"\n图片: {image_count}张"
+                if face_count > 0:
+                    msg += f"\n表情: {face_count}个"
+                if at_count > 0:
+                    msg += f"\nAt: {at_count}人"
                 msg += f"\n已影响会话数: {session_count}"
                 yield event.plain_result(msg)
 
@@ -932,6 +1060,10 @@ class ReminderPlugin(Star):
                             chain.append(Image.fromFileSystem(full_path))
                         else:
                             logger.warning(f"图片文件不存在: {full_path}")
+                    elif item['type'] == 'at':
+                        chain.append(At(qq=item['qq']))
+                    elif item['type'] == 'face':
+                        chain.append(Face(id=item['id']))
 
             # 使用 MessageChain 返回
             message_chain = MessageChain()
@@ -944,8 +1076,9 @@ class ReminderPlugin(Star):
                 if reminder_name in self.linked_tasks and self.linked_tasks[reminder_name]:
                     linked_commands = self.linked_tasks[reminder_name]
                     linked_info = f"🔗 {target_item['name']} 已链接的任务:\n"
-                    for i, cmd in enumerate(linked_commands, 1):
-                        linked_info += f"  {i}. {cmd}\n"
+                    for i, cmd_data in enumerate(linked_commands, 1):
+                        cmd_str = cmd_data if isinstance(cmd_data, str) else cmd_data.get('command', '')
+                        linked_info += f"  {i}. {cmd_str}\n"
                     yield event.plain_result(linked_info)
 
         else:
@@ -970,12 +1103,18 @@ class ReminderPlugin(Star):
                     # 提醒显示内容统计
                     text_count = sum(1 for msg_item in item['message_structure'] if msg_item['type'] == 'text')
                     image_count = sum(1 for msg_item in item['message_structure'] if msg_item['type'] == 'image')
+                    face_count = sum(1 for msg_item in item['message_structure'] if msg_item['type'] == 'face')
+                    at_count = sum(1 for msg_item in item['message_structure'] if msg_item['type'] == 'at')
 
                     content_parts = []
                     if text_count > 0:
                         content_parts.append(f"文字{text_count}段")
                     if image_count > 0:
                         content_parts.append(f"图片{image_count}张")
+                    if face_count > 0:
+                        content_parts.append(f"表情{face_count}个")
+                    if at_count > 0:
+                        content_parts.append(f"At{at_count}人")
 
                     if content_parts:
                         result += f"   内容: {' + '.join(content_parts)}\n"
@@ -1137,8 +1276,26 @@ class ReminderPlugin(Star):
             if reminder_name not in self.linked_tasks:
                 self.linked_tasks[reminder_name] = []
 
-            # 添加链接关系到列表 (现在允许重复链接)
-            self.linked_tasks[reminder_name].append(command_with_args)
+            # 提取消息中的 Face 和 At 组件
+            message_structure = []
+            for msg_comp in event.get_messages():
+                if isinstance(msg_comp, At):
+                    message_structure.append({
+                        "type": "at",
+                        "qq": msg_comp.qq
+                    })
+                elif isinstance(msg_comp, Face):
+                    message_structure.append({
+                        "type": "face",
+                        "id": msg_comp.id
+                    })
+
+            # 添加链接关系到列表
+            linked_item = {
+                'command': command_with_args,
+                'message_structure': message_structure
+            }
+            self.linked_tasks[reminder_name].append(linked_item)
             self._save_reminders()
 
             # 计算当前链接的任务数量
@@ -1297,8 +1454,21 @@ class ReminderPlugin(Star):
             if commands:  # 确保有链接的命令
                 count += 1
                 result += f"{count}. 提醒 '{reminder_name}' 链接了 {len(commands)} 个任务:\n"
-                for i, cmd in enumerate(commands, 1):
-                    result += f"   {i}. {cmd}\n"
+                for i, cmd_data in enumerate(commands, 1):
+                    cmd_str = ""
+                    extras = []
+                    if isinstance(cmd_data, str):
+                        cmd_str = cmd_data
+                    elif isinstance(cmd_data, dict):
+                        cmd_str = cmd_data.get('command', '')
+                        msg_struct = cmd_data.get('message_structure', [])
+                        face_count = sum(1 for x in msg_struct if x['type'] == 'face')
+                        at_count = sum(1 for x in msg_struct if x['type'] == 'at')
+                        if face_count: extras.append(f"表情{face_count}个")
+                        if at_count: extras.append(f"At{at_count}人")
+                    
+                    extra_str = f" ({' + '.join(extras)})" if extras else ""
+                    result += f"   {i}. {cmd_str}{extra_str}\n"
                 result += "\n"
 
         if count == 0:
@@ -1350,7 +1520,8 @@ class ReminderPlugin(Star):
             return
 
         # 获取要删除的命令
-        deleted_command = commands[command_index - 1]
+        deleted_command_data = commands[command_index - 1]
+        deleted_command = deleted_command_data if isinstance(deleted_command_data, str) else deleted_command_data.get('command', '')
 
         # 从列表中删除命令
         commands.pop(command_index - 1)

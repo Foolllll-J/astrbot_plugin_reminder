@@ -35,7 +35,7 @@ class CommandTrigger:
             return path_str[6:]
         return path_str
 
-    async def trigger_and_forward_command(self, unified_msg_origin: str, item: dict, command: str):
+    async def trigger_and_forward_command(self, unified_msg_origin: str, item: dict, command: str, is_admin: bool = True, original_components: list = None, self_id: str = None):
         target_dest = self._get_original_session_id(unified_msg_origin)
         
         from .event_factory import EventFactory
@@ -44,7 +44,10 @@ class CommandTrigger:
             unified_msg_origin, 
             command, 
             item.get('created_by', 'timer'), 
-            item.get('creator_name', 'Timer')
+            item.get('creator_name', 'Timer'),
+            original_components=original_components,
+            is_admin=is_admin,
+            self_id=self_id
         )
 
         # 记录原始方法
@@ -66,7 +69,8 @@ class CommandTrigger:
                     
                     # 确保转发时携带正确的 Bot self_id
                     if not hasattr(chain, 'self_id') or not chain.self_id:
-                        chain.self_id = getattr(event, 'self_id', None)
+                        if hasattr(event, 'get_self_id'):
+                             chain.self_id = event.get_self_id()
                     
                     await self.context.send_message(target_dest, chain)
             except Exception:
@@ -95,13 +99,9 @@ class CommandTrigger:
                 if not _is_timer_execution.get():
                     return await original_call(action, **params)
                 
-                current_self_id = params.get("self_id") or (getattr(event.bot, 'self_id', None))
-                target_self_id = getattr(event, 'self_id', None)
-                
                 is_msg_api = action in ["send_msg", "send_group_msg", "send_private_msg", "send_private_forward_msg", "send_group_forward_msg"]
-                is_same_bot = str(current_self_id) == str(target_self_id)
                 
-                if _forwarding_lock.get() or not (is_msg_api and is_same_bot):
+                if _forwarding_lock.get() or not is_msg_api:
                     return await original_call(action, **params)
 
                 # 提取消息内容
