@@ -7,4 +7,7 @@ on:
 
 jobs:
   call-stale-logic:
+    permissions:
+      issues: write
+      pull-requests: write
     uses: Foolllll-J/.github-shared-config/.github/workflows/stale-logic.yml@main
