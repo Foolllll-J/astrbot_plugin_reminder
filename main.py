@@ -18,7 +18,7 @@ import time
 
 from .core.command_trigger import CommandTrigger
 
-@register("astrbot_plugin_reminder", "Foolllll", "支持在指定会话定时发送消息或执行任务，支持cron表达式、富媒体消息", "1.1")
+@register("astrbot_plugin_reminder", "Foolllll", "支持在指定会话定时发送消息或执行任务，支持cron表达式、富媒体消息", "1.1.2")
 class ReminderPlugin(Star):
     def __init__(self, context: Context, config: dict = None):
         super().__init__(context)
@@ -990,7 +990,7 @@ class ReminderPlugin(Star):
             return
 
         # 解析参数：检查是否指定了名称或序号
-        params = name.strip()
+        params = str(name).strip()
 
         if params:
             target_item = None
@@ -1227,7 +1227,7 @@ class ReminderPlugin(Star):
         if key is None:
             yield event.plain_result("❌ 参数缺失！\n用法: /删除任务 <序号或名称>")
             return
-        async for result in self._delete_item(event, key.strip(), delete_tasks=True):
+        async for result in self._delete_item(event, str(key).strip(), delete_tasks=True):
             yield result
 
     @filter.command("链接提醒")
@@ -1314,7 +1314,7 @@ class ReminderPlugin(Star):
         if key is None:
             yield event.plain_result("❌ 参数缺失！\n用法: /删除提醒 <序号或名称>")
             return
-        async for result in self._delete_item(event, key.strip(), delete_tasks=False):
+        async for result in self._delete_item(event, str(key).strip(), delete_tasks=False):
             yield result
 
     def _resolve_session_from_param(self, event: AstrMessageEvent, session_param: str | None) -> str | None:
