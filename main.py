@@ -18,10 +18,20 @@ import time
 from pathlib import Path
 
 from .core.command_trigger import CommandTrigger
+from .core.reminder_utils import (
+    build_job_id,
+    collect_text_from_message_structure,
+    describe_origin,
+    describe_target_origin,
+    extract_message_id,
+    format_duration_cn,
+    normalize_message_structure,
+    parse_recall_seconds,
+    resolve_session_origin,
+    translate_to_apscheduler_cron,
+)
 
 
-@register("astrbot_plugin_reminder", "Foolllll", "支持在指定会话定时发送消息或执行任务，支持cron表达式、富媒体消息",
-          "1.1.2")
 class ReminderPlugin(Star):
     def __init__(self, context: Context, config: dict = None):
         super().__init__(context)
@@ -31,12 +41,13 @@ class ReminderPlugin(Star):
         os.makedirs(self.data_dir, exist_ok=True)
         self.data_file = os.path.join(self.data_dir, "reminders.json")
         self.reminders: List[Dict] = []
-        self.linked_tasks: Dict[str, List[str]] = {}
+        self.linked_tasks: Dict[str, List[Dict]] = {}
         self.job_mapping: Dict[str, Dict[str, str]] = {}
         self._load_reminders()
         self.whitelist = self.config.get('whitelist', [])
         self.monitor_timeout = self.config.get('monitor_timeout', 60)
         self._running_triggers = set()
+        self._recall_notice_sent: set[str] = set()
         logger.info("定时提醒助手已加载")
 
     def _is_allowed(self, event: AstrMessageEvent):
@@ -52,123 +63,6 @@ class ReminderPlugin(Star):
         self._restore_reminders()
         self.scheduler.start()
         logger.info(f"定时提醒助手启动成功，已加载 {len(self.reminders)} 个提醒任务")
-
-    def _translate_to_apscheduler_cron(self, cron_expr: str) -> str:
-        """
-        将标准 cron 表达式 (0-7, 0/7=Sun) 转换为 APScheduler 格式 (0-6, 0=Mon, 6=Sun)
-        通过将数字映射为英文缩写 (mon, tue...) 来实现兼容
-        """
-        parts = cron_expr.split()
-        if len(parts) != 5:
-            return cron_expr
-
-        minute, hour, day, month, dow = parts
-
-        # 标准映射: 0=Sun, 1=Mon, ..., 6=Sat, 7=Sun
-        mapping = {
-            '0': 'sun', '1': 'mon', '2': 'tue', '3': 'wed',
-            '4': 'thu', '5': 'fri', '6': 'sat', '7': 'sun'
-        }
-
-        def replace_func(match):
-            val = match.group(0)
-            return mapping.get(val, val)
-
-        # 仅替换星期字段中的数字
-        new_dow = re.sub(r'\d+', replace_func, dow)
-        return f"{minute} {hour} {day} {month} {new_dow}"
-
-    def _parse_recall_seconds(self, content_text: str) -> tuple[Optional[int], str]:
-        """从提醒正文开头解析可选撤回时间(HH:MM:SS)。"""
-        if not content_text:
-            return None, ""
-
-        stripped = content_text.lstrip()
-        match = re.match(r'^(\d{1,2}):([0-5]\d):([0-5]\d)(?:\s+|$)', stripped)
-        if not match:
-            return None, content_text
-
-        hour = int(match.group(1))
-        minute = int(match.group(2))
-        second = int(match.group(3))
-        recall_seconds = hour * 3600 + minute * 60 + second
-
-        cleaned = stripped[match.end():].lstrip()
-        return recall_seconds, cleaned
-
-    def _normalize_reminder_message_structure(self, message_structure: List[Dict], recall_text: str = "") -> List[Dict]:
-        """将 [atall]/[at:QQ号] 标识转成消息组件，并移除已解析的撤回时间文本。"""
-        normalized: List[Dict] = []
-        recall_stripped = False
-        mention_pattern = re.compile(r'\[(atall|at\s*:\s*(\d+))\]', re.IGNORECASE)
-
-        for comp in message_structure:
-            if comp.get('type') != 'text':
-                normalized.append(comp)
-                continue
-
-            text = comp.get('content', '')
-            if not recall_stripped and recall_text:
-                tmp = text.lstrip()
-                if tmp.startswith(recall_text):
-                    tmp = tmp[len(recall_text):]
-                    text = tmp.lstrip()
-                    recall_stripped = True
-
-            last_end = 0
-            for match in mention_pattern.finditer(text):
-                if match.start() > last_end:
-                    plain_text = text[last_end:match.start()]
-                    if plain_text:
-                        normalized.append({
-                            'type': 'text',
-                            'content': plain_text
-                        })
-
-                qq = match.group(2)
-                if qq:
-                    normalized.append({
-                        'type': 'at',
-                        'qq': qq
-                    })
-                else:
-                    normalized.append({'type': 'atall'})
-                last_end = match.end()
-
-            tail = text[last_end:]
-            if tail:
-                normalized.append({
-                    'type': 'text',
-                    'content': tail
-                })
-
-        return normalized
-
-    def _extract_message_id(self, send_result: Any) -> Optional[int | str]:
-        """尽最大可能从 send_message 返回值中提取 message_id。"""
-        if send_result is None:
-            return None
-
-        # bool 是 int 的子类，必须先排除，避免 True/False 被误当 message_id
-        if isinstance(send_result, bool):
-            return None
-
-        if isinstance(send_result, (int, str)):
-            return send_result
-
-        if isinstance(send_result, dict):
-            if 'message_id' in send_result:
-                return send_result.get('message_id')
-            data = send_result.get('data')
-            if isinstance(data, dict):
-                return data.get('message_id')
-            if 'id' in send_result:
-                return send_result.get('id')
-
-        if hasattr(send_result, 'message_id'):
-            return getattr(send_result, 'message_id')
-
-        return None
 
     def _get_platform_adapter_name(self, platform_id: str) -> str:
         """将 unified_msg_origin 里的平台实例ID解析为适配器名（如 aiocqhttp）。"""
@@ -204,6 +98,40 @@ class ReminderPlugin(Star):
             if hasattr(client, 'api'):
                 return client.api
         return None
+
+    def _check_recall_capability(self, unified_msg_origin: str) -> tuple[bool, str]:
+        """检查目标会话是否支持自动撤回。"""
+        if not unified_msg_origin or ':' not in unified_msg_origin:
+            return False, "无法识别目标会话的平台信息"
+
+        platform_id = unified_msg_origin.split(':', 1)[0]
+        adapter_name = self._get_platform_adapter_name(platform_id)
+        if adapter_name != 'aiocqhttp':
+            return False, f"平台 {platform_id}({adapter_name}) 暂不支持自动撤回"
+
+        api = self._get_platform_api_client(platform_id)
+        if not api:
+            return False, f"平台 {platform_id} 缺少可用 API，无法自动撤回"
+
+        return True, ""
+
+    async def _notify_recall_not_supported_once(self, item: Dict, unified_msg_origin: str, reason: str):
+        """在执行期对同一提醒+会话仅提示一次“不支持自动撤回”。"""
+        item_id = item.get('id') or item.get('name', 'unknown')
+        notice_key = f"{item_id}::{unified_msg_origin}"
+        if notice_key in self._recall_notice_sent:
+            return
+        self._recall_notice_sent.add(notice_key)
+
+        try:
+            reminder_name = item.get('name', '未命名提醒')
+            message_chain = MessageChain()
+            message_chain.chain = [
+                Plain(f"⚠️ 提醒「{reminder_name}」已配置自动撤回，但{reason}，将仅发送不撤回。")
+            ]
+            await self.context.send_message(unified_msg_origin, message_chain)
+        except Exception as e:
+            logger.warning(f"发送“自动撤回不支持”提示失败: {e}")
 
     async def _send_aiocqhttp_with_message_id(self, item: Dict, unified_msg_origin: str) -> Optional[int | str]:
         """通过 OneBot v11 直接发送消息，确保拿到 message_id。"""
@@ -252,7 +180,7 @@ class ReminderPlugin(Star):
         else:
             return None
 
-        return self._extract_message_id(ret)
+        return extract_message_id(ret)
 
     async def _recall_message_later(self, unified_msg_origin: str, message_id: int | str, delay_seconds: int):
         """延时撤回消息，目前仅在 aiocqhttp(OneBot v11) 平台启用。"""
@@ -313,6 +241,7 @@ class ReminderPlugin(Star):
 
             name_map: Dict[str, str] = {}
             existing_names = set()
+            need_resave = False
 
             for item in raw_reminders:
                 orig_name = str(item.get('name', '')).strip()
@@ -356,19 +285,55 @@ class ReminderPlugin(Star):
                 if 'unified_msg_origin' in item:
                     item.pop('unified_msg_origin', None)
 
+                if isinstance(item.get('message_structure'), list):
+                    normalized_message_structure = normalize_message_structure(item['message_structure'])
+                    if normalized_message_structure != item['message_structure']:
+                        item['message_structure'] = normalized_message_structure
+                        need_resave = True
+
+                    if item.get('is_task', False):
+                        normalized_command = collect_text_from_message_structure(item['message_structure']).strip()
+                        if normalized_command and normalized_command != item.get('command', ''):
+                            item['command'] = normalized_command
+                            need_resave = True
+
                 self.reminders.append(item)
 
             migrated_linked_tasks: Dict[str, List[Dict]] = {}
             for old_name, commands in normalized_linked_tasks.items():
                 new_name = name_map.get(old_name, old_name)
+                normalized_commands: List[Dict] = []
+                for cmd in commands:
+                    if isinstance(cmd, str):
+                        normalized_commands.append({'command': cmd, 'message_structure': []})
+                        need_resave = True
+                        continue
+
+                    if not isinstance(cmd, dict):
+                        need_resave = True
+                        continue
+
+                    cmd_struct = cmd.get('message_structure')
+                    if not isinstance(cmd_struct, list):
+                        cmd_struct = []
+                        cmd['message_structure'] = cmd_struct
+                        need_resave = True
+
+                    normalized_cmd_struct = normalize_message_structure(cmd_struct)
+                    if normalized_cmd_struct != cmd_struct:
+                        cmd['message_structure'] = normalized_cmd_struct
+                        need_resave = True
+
+                    normalized_commands.append(cmd)
+
                 if new_name not in migrated_linked_tasks:
-                    migrated_linked_tasks[new_name] = list(commands)
+                    migrated_linked_tasks[new_name] = normalized_commands
                 else:
-                    migrated_linked_tasks[new_name].extend(commands)
+                    migrated_linked_tasks[new_name].extend(normalized_commands)
 
             self.linked_tasks = migrated_linked_tasks
 
-            if name_map:
+            if name_map or need_resave:
                 self._save_reminders()
         except Exception as e:
             logger.error(f"加载提醒数据失败: {e}")
@@ -387,9 +352,6 @@ class ReminderPlugin(Star):
         except Exception as e:
             logger.error(f"保存提醒数据失败: {e}")
 
-    def _build_job_id(self, item: Dict, session: str) -> str:
-        safe_session = session.replace(":", "_")
-        return f"{item['id']}::{safe_session}"
 
     def _restore_reminders(self):
         """恢复所有提醒任务到调度器"""
@@ -408,14 +370,14 @@ class ReminderPlugin(Star):
             return
 
         cron_expr = item['cron']
-        aps_cron = self._translate_to_apscheduler_cron(cron_expr)
+        aps_cron = translate_to_apscheduler_cron(cron_expr)
 
         if item.get('is_task', False):
             job_func = self._execute_task
         else:
             job_func = self._send_reminder
 
-        job_id = self._build_job_id(item, session)
+        job_id = build_job_id(item['id'], session)
 
         self.scheduler.add_job(
             job_func,
@@ -489,19 +451,27 @@ class ReminderPlugin(Star):
                 return
             recall_after_seconds = int(item.get('recall_after_seconds', 0) or 0)
             message_id = None
+            recall_supported = False
+            recall_reason = ""
 
-            # 需要撤回时，aiocqhttp 优先走底层 API 发送以确保拿到 message_id
             if recall_after_seconds > 0:
-                message_id = await self._send_aiocqhttp_with_message_id(item, unified_msg_origin)
+                recall_supported, recall_reason = self._check_recall_capability(unified_msg_origin)
+                if recall_supported:
+                    # 需要撤回时，aiocqhttp 优先走底层 API 发送以确保拿到 message_id
+                    message_id = await self._send_aiocqhttp_with_message_id(item, unified_msg_origin)
+                else:
+                    logger.warning(
+                        f"提醒 '{item.get('name', 'unknown')}' 配置了自动撤回，但{recall_reason}，本次仅发送不撤回")
+                    await self._notify_recall_not_supported_once(item, unified_msg_origin, recall_reason)
 
             # 其余情况或底层发送失败时，走统一发送接口
             if message_id is None:
                 message_chain = MessageChain()
                 message_chain.chain = chain
                 send_ret = await self.context.send_message(unified_msg_origin, message_chain)
-                message_id = self._extract_message_id(send_ret)
+                message_id = extract_message_id(send_ret)
 
-            if recall_after_seconds > 0:
+            if recall_after_seconds > 0 and recall_supported:
                 if message_id is not None:
                     asyncio.create_task(
                         self._recall_message_later(unified_msg_origin, message_id, recall_after_seconds))
@@ -565,13 +535,30 @@ class ReminderPlugin(Star):
             command = linked_task_data
         elif isinstance(linked_task_data, dict):
             command = linked_task_data.get('command', '')
-            # 还原组件
-            if 'message_structure' in linked_task_data:
-                for comp in linked_task_data['message_structure']:
+            # 还原组件，并兼容历史占位写法（[at:xxx]/[atall]）
+
+            message_structure = linked_task_data.get('message_structure', [])
+            if isinstance(message_structure, list):
+                message_structure = normalize_message_structure(message_structure)
+                for comp in message_structure:
                     if comp['type'] == 'at':
                         original_components.append(At(qq=comp['qq']))
+                    elif comp['type'] == 'atall':
+                        original_components.append(At(qq="all"))
                     elif comp['type'] == 'face':
                         original_components.append(Face(id=comp['id']))
+
+        # 兼容历史链接任务：也从 command 文本中解析 [at:xxx]/[atall]
+
+        cmd_structure = normalize_message_structure([{'type': 'text', 'content': command}])
+        parsed_command = collect_text_from_message_structure(cmd_structure).strip()
+        if parsed_command:
+            command = parsed_command
+        for comp in cmd_structure:
+            if comp.get('type') == 'at':
+                original_components.append(At(qq=comp.get('qq', '')))
+            elif comp.get('type') == 'atall':
+                original_components.append(At(qq="all"))
 
         if command:
             await self._execute_command_common(command, unified_msg_origin, item, "链接任务",
@@ -598,41 +585,66 @@ class ReminderPlugin(Star):
             original_components = []
             final_command = command
 
-            if 'message_structure' in item and item['message_structure']:
+            message_structure = item.get('message_structure')
+            if isinstance(message_structure, list) and message_structure:
+                # 兼容历史任务：将文本占位 At 归一化为结构化组件
+
+                message_structure = normalize_message_structure(message_structure)
+                item['message_structure'] = message_structure
+
                 components_list = []
                 temp_text = ""
 
-                # 构建完整的组件列表
-                for comp in item['message_structure']:
+                # 构建完整组件列表（文本/艾特/表情）
+
+                for comp in message_structure:
                     if comp['type'] == 'text':
                         temp_text += comp['content']
                         components_list.append(Plain(comp['content']))
                     elif comp['type'] == 'at':
                         components_list.append(At(qq=comp['qq']))
+                    elif comp['type'] == 'atall':
+                        components_list.append(At(qq="all"))
                     elif comp['type'] == 'face':
                         components_list.append(Face(id=comp['id']))
                     elif comp['type'] == 'image':
-                        # 任务通常不处理图片作为指令一部分，但保留以防万一
+                        # 任务指令通常不包含图片，这里仅为兼容历史结构保留
+
+
+
                         pass
 
                 if temp_text:
                     final_command = temp_text.strip()
 
-                # 如果 components_list 包含 Plain，则将其用作 original_components
+                # 复用完整组件列表作为 original_components 透传给触发器
                 if components_list:
                     original_components = components_list
             else:
-                # 兼容旧数据
-                if 'message_structure' in item:
-                    for comp in item['message_structure']:
-                        if comp['type'] == 'at':
-                            original_components.append(At(qq=comp['qq']))
+                # 兼容旧数据：仅有 command 文本时也尝试解析 [at:xxx]/[atall]
+
+
+                cmd_structure = normalize_message_structure([{'type': 'text', 'content': command}])
+                parsed_command = collect_text_from_message_structure(cmd_structure).strip()
+                if parsed_command:
+                    final_command = parsed_command
+
+                for comp in cmd_structure:
+                    if comp.get('type') == 'at':
+                        original_components.append(At(qq=comp.get('qq', '')))
+                    elif comp.get('type') == 'atall':
+                        original_components.append(At(qq="all"))
 
             # 获取创建者权限状态
+
             is_admin = item.get('is_admin', True)
 
             # 获取记录的 self_id
             self_id = item.get('self_id')
+
+            if not final_command:
+                logger.warning(f"任务 '{item.get('name', 'unknown')}' 解析后指令为空")
+                return
 
             await self._execute_command_common(final_command, unified_msg_origin, item, "任务",
                                                original_components=original_components, is_admin=is_admin,
@@ -660,14 +672,14 @@ class ReminderPlugin(Star):
 
             if len(parts) < 3:
                 usage_content_desc = '指令' if is_task else '消息内容'
-                example_content = '/签到' if is_task else '早上好！'
                 yield event.plain_result(
                     f"格式错误！\n"
                     f"用法1（当前会话）: /添加{command_name} <{command_name}名称> <cron表达式(5段)> <{usage_content_desc}>\n"
-                    f"用法2（指定群聊/私聊）: /添加{command_name} <{command_name}名称> [@<群号>|#<好友号>] <cron表达式(5段)> <{usage_content_desc}>\n"
+                    f"用法2（指定私聊/群聊）: /添加{command_name} <{command_name}名称> [@<好友号>|#<群号>] <cron表达式(5段)> <{usage_content_desc}>\n"
                     f"cron表达式格式: 分 时 日 月 周\n"
                     f"示例1: /添加{command_name} 早安 0 9 * * * {'/签到' if is_task else '早上好！'}\n"
-                    f"示例2: /添加{command_name} 早安 @123456 0 9 * * * {'/签到' if is_task else '早上好！'}\n"
+                    f"示例2: /添加{command_name} 早安 #123456 0 9 * * * {'/签到' if is_task else '早上好！'}\n"
+
                     f"{'💡 指令需以指令前缀开头，允许空格接参数' if is_task else '💡 可以在发送指令的同时附上图片，提醒时会一起发送文字和图片'}\n"
                     f"💡 不指定会话参数时，会自动发送到当前会话"
                 )
@@ -685,56 +697,30 @@ class ReminderPlugin(Star):
                     yield event.plain_result(f"❌ {command_name}名称 '{name}' 已存在，请使用不同的名称")
                     return
 
-            # 尝试解析是否包含目标会话（群聊使用 @群号，私聊使用 #好友号）
+            # 尝试解析是否包含目标会话（私聊使用 @好友号，群聊使用 #群号）
             remaining_parts = remaining.split(maxsplit=1)
-            if len(remaining_parts) >= 2 and remaining_parts[0].startswith('@'):
-                # 格式2：指定了目标群号
-                group_id = remaining_parts[0][1:]  # 去掉 @ 符号
+            session_param = None
+            if len(remaining_parts) >= 2 and remaining_parts[0].startswith(('@', '#')):
+                session_param = remaining_parts[0]
                 remaining = remaining_parts[1]
 
-                # 构建 unified_msg_origin
-                # 从当前会话中提取平台信息
-                current_origin = event.unified_msg_origin
-                if ':' in current_origin:
-                    platform = current_origin.split(':')[0]
-                    unified_msg_origin = f"{platform}:GroupMessage:{group_id}"
-                    logger.info(f"检测到目标群号: {group_id}, 构建会话ID: {unified_msg_origin}")
-                else:
-                    yield event.plain_result("❌ 无法识别当前平台信息，请使用当前会话模式")
-                    return
-            elif len(remaining_parts) >= 2 and remaining_parts[0].startswith('#'):
-                # 格式2：指定了目标私聊
-                friend_id = remaining_parts[0][1:]  # 去掉 # 符号
-                remaining = remaining_parts[1]
+            unified_msg_origin = resolve_session_origin(
+                event.unified_msg_origin,
+                event.get_message_type() == MessageType.GROUP_MESSAGE,
+                session_param,
+            )
+            if not unified_msg_origin:
+                yield event.plain_result("❌ 无法识别当前平台信息，请使用当前会话模式")
+                return
 
-                # 构建 unified_msg_origin
-                current_origin = event.unified_msg_origin
-                if ':' in current_origin:
-                    platform = current_origin.split(':')[0]
-                    unified_msg_origin = f"{platform}:FriendMessage:{friend_id}"
-                    logger.info(f"检测到目标好友: {friend_id}, 构建会话ID: {unified_msg_origin}")
-                else:
-                    yield event.plain_result("❌ 无法识别当前平台信息，请使用当前会话模式")
-                    return
+            if session_param and session_param.startswith('@'):
+                friend_id = session_param[1:]
+                logger.info(f"检测到目标好友: {friend_id}, 构建会话ID: {unified_msg_origin}")
+            elif session_param and session_param.startswith('#'):
+                group_id = session_param[1:]
+                logger.info(f"检测到目标群号: {group_id}, 构建会话ID: {unified_msg_origin}")
             else:
-                # 格式1：使用当前会话
-                current_origin = event.unified_msg_origin
-                if event.get_message_type() == MessageType.GROUP_MESSAGE:
-                    # 如果是群聊，确保 origin 包含 GroupMessage 标识
-                    if ":" in current_origin:
-                        parts = current_origin.split(":", 1)
-                        if len(parts) == 2 and "GroupMessage" not in current_origin and "FriendMessage" not in current_origin:
-                            unified_msg_origin = f"{parts[0]}:GroupMessage:{parts[1]}"
-                        else:
-                            unified_msg_origin = current_origin
-                    else:
-                        unified_msg_origin = current_origin
-                else:
-                    unified_msg_origin = current_origin
                 logger.info(f"使用当前会话ID: {unified_msg_origin}")
-
-            # 解析cron表达式（需要5段）
-            # 使用 maxsplit=5 来分割，前5段是cron表达式，剩余的都是内容
             remaining_parts = remaining.split(maxsplit=5)
 
             if len(remaining_parts) < 5:
@@ -775,7 +761,7 @@ class ReminderPlugin(Star):
             cron_expr = ' '.join(cron_parts)
 
             # 转换为 APScheduler 兼容格式进行验证
-            aps_cron = self._translate_to_apscheduler_cron(cron_expr)
+            aps_cron = translate_to_apscheduler_cron(cron_expr)
 
             content_text = ""
             if len(remaining_parts) > 5:
@@ -787,7 +773,7 @@ class ReminderPlugin(Star):
             recall_after_seconds = None
             recall_time_token = ""
             if not is_task:
-                recall_after_seconds, cleaned_content = self._parse_recall_seconds(content_text)
+                recall_after_seconds, cleaned_content = parse_recall_seconds(content_text)
                 if recall_after_seconds is not None:
                     recall_time_token = content_text.lstrip().split(maxsplit=1)[0]
                     content_text = cleaned_content
@@ -831,10 +817,16 @@ class ReminderPlugin(Star):
 
                 elif isinstance(msg_comp, At):
                     if cron_found:
-                        message_structure.append({
-                            "type": "at",
-                            "qq": msg_comp.qq
-                        })
+                        qq = str(msg_comp.qq)
+                        if qq.lower() == "all":
+                            message_structure.append({
+                                "type": "atall"
+                            })
+                        else:
+                            message_structure.append({
+                                "type": "at",
+                                "qq": qq
+                            })
 
                 elif isinstance(msg_comp, Face):
                     if cron_found:
@@ -870,19 +862,25 @@ class ReminderPlugin(Star):
                         except Exception as e:
                             logger.error(f"保存图片失败: {e}")
 
-            # 根据是否是任务验证内容
+            # 根据类型校验内容（任务/提醒）
+
             if is_task:
+                message_structure = normalize_message_structure(message_structure)
+                normalized_command = collect_text_from_message_structure(message_structure).strip()
+                if normalized_command:
+                    content_text = normalized_command
+
                 if not content_text:
                     yield event.plain_result(f"❌ 任务指令不能为空")
                     return
             else:
-                message_structure = self._normalize_reminder_message_structure(message_structure, recall_time_token)
-                # 验证至少有消息内容
+                message_structure = normalize_message_structure(message_structure, recall_time_token)
+                # 提醒至少需要一个可发送的内容片段
+
                 if not message_structure:
                     yield event.plain_result("提醒内容不能为空，请至少提供文字或图片")
                     return
 
-            # 创建对象
             item_id = f"{'task' if is_task else 'reminder'}_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{len(self.reminders)}"
 
             # 获取 self_id
@@ -919,18 +917,7 @@ class ReminderPlugin(Star):
             self.reminders.append(item)
             self._save_reminders()
 
-            is_current_session = (unified_msg_origin == event.unified_msg_origin)
-            if is_current_session:
-                target_desc = "当前会话"
-            else:
-                if ':GroupMessage:' in unified_msg_origin:
-                    group_id = unified_msg_origin.split(':GroupMessage:')[1]
-                    target_desc = f"群聊 {group_id}"
-                elif ':FriendMessage:' in unified_msg_origin:
-                    friend_id = unified_msg_origin.split(':FriendMessage:')[1]
-                    target_desc = f"私聊 {friend_id}"
-                else:
-                    target_desc = unified_msg_origin
+            target_desc = describe_target_origin(unified_msg_origin, event.unified_msg_origin)
 
             if is_task:
                 result_msg = f"✅ {command_name}已添加！\n名称: {name}\n目标: {target_desc}\ncron: {cron_expr}\n指令: {content_text}"
@@ -951,13 +938,14 @@ class ReminderPlugin(Star):
                 if at_count > 0:
                     result_msg += f"\nAt: {at_count}人"
                 if item.get('recall_after_seconds', 0) > 0:
-                    sec = item['recall_after_seconds']
-                    h = sec // 3600
-                    m = (sec % 3600) // 60
-                    s = sec % 60
-                    result_msg += f"\n撤回: {h:02d}:{m:02d}:{s:02d}"
+                    result_msg += f"\n撤回: {format_duration_cn(item['recall_after_seconds'])}"
 
             logger.info(f"成功添加{command_name}: {name}, unified_msg_origin: {unified_msg_origin}, cron: {cron_expr}")
+            if not is_task and item.get('recall_after_seconds', 0) > 0:
+                recall_ok, recall_reason = self._check_recall_capability(unified_msg_origin)
+                if not recall_ok:
+                    result_msg += f"\n⚠️ 已设置撤回，但{recall_reason}，将仅发送不撤回。"
+
             yield event.plain_result(result_msg)
 
         except Exception as e:
@@ -1033,7 +1021,7 @@ class ReminderPlugin(Star):
 
             cron_parts[4] = cleaned_last_part
             cron_expr = ' '.join(cron_parts)
-            aps_cron = self._translate_to_apscheduler_cron(cron_expr)
+            aps_cron = translate_to_apscheduler_cron(cron_expr)
 
             content_text = ""
             if len(remaining_parts) > 5:
@@ -1045,7 +1033,7 @@ class ReminderPlugin(Star):
             recall_after_seconds = None
             recall_time_token = ""
             if not is_task:
-                recall_after_seconds, cleaned_content = self._parse_recall_seconds(content_text)
+                recall_after_seconds, cleaned_content = parse_recall_seconds(content_text)
                 if recall_after_seconds is not None:
                     recall_time_token = content_text.lstrip().split(maxsplit=1)[0]
                     content_text = cleaned_content
@@ -1084,10 +1072,16 @@ class ReminderPlugin(Star):
 
                 elif isinstance(msg_comp, At):
                     if cron_found:
-                        message_structure.append({
-                            "type": "at",
-                            "qq": msg_comp.qq
-                        })
+                        qq = str(msg_comp.qq)
+                        if qq.lower() == "all":
+                            message_structure.append({
+                                "type": "atall"
+                            })
+                        else:
+                            message_structure.append({
+                                "type": "at",
+                                "qq": qq
+                            })
 
                 elif isinstance(msg_comp, Face):
                     if cron_found:
@@ -1123,13 +1117,18 @@ class ReminderPlugin(Star):
                             logger.error(f"保存图片失败: {e}")
 
             if is_task:
+                message_structure = normalize_message_structure(message_structure)
+                normalized_command = collect_text_from_message_structure(message_structure).strip()
+                if normalized_command:
+                    content_text = normalized_command
+
                 if not content_text:
                     yield event.plain_result(f"❌ 任务指令不能为空")
                     return
                 target_item['command'] = content_text
                 target_item['message_structure'] = message_structure
             else:
-                message_structure = self._normalize_reminder_message_structure(message_structure, recall_time_token)
+                message_structure = normalize_message_structure(message_structure, recall_time_token)
                 if not message_structure:
                     yield event.plain_result("提醒内容不能为空，请至少提供文字或图片")
                     return
@@ -1180,12 +1179,19 @@ class ReminderPlugin(Star):
                 if at_count > 0:
                     msg += f"\nAt: {at_count}人"
                 if target_item.get('recall_after_seconds', 0) > 0:
-                    sec = target_item['recall_after_seconds']
-                    h = sec // 3600
-                    m = (sec % 3600) // 60
-                    s = sec % 60
-                    msg += f"\n撤回: {h:02d}:{m:02d}:{s:02d}"
+                    msg += f"\n撤回: {format_duration_cn(target_item['recall_after_seconds'])}"
                 msg += f"\n已影响会话数: {session_count}"
+                if target_item.get('recall_after_seconds', 0) > 0 and sessions:
+                    unsupported_sessions = []
+                    for s in sessions:
+                        recall_ok, _ = self._check_recall_capability(s)
+                        if not recall_ok:
+                            unsupported_sessions.append(describe_origin(s))
+                    if unsupported_sessions:
+                        display_sessions = "、".join(unsupported_sessions[:3])
+                        if len(unsupported_sessions) > 3:
+                            display_sessions += f" 等{len(unsupported_sessions)}个会话"
+                        msg += f"\n⚠️ 以下会话不支持自动撤回: {display_sessions}（将仅发送不撤回）"
                 yield event.plain_result(msg)
 
         except Exception as e:
@@ -1196,7 +1202,7 @@ class ReminderPlugin(Star):
     async def add_task(self, event: AstrMessageEvent):
         """添加定时任务
         格式1（当前会话）: /添加任务 <任务名称> <cron表达式> <指令>
-        格式2（指定群聊/私聊）: /添加任务 <任务名称> [@<群号>|#<好友号>] <cron表达式> <指令>
+        格式2（指定私聊/群聊）: /添加任务 <任务名称> [@<好友号>|#<群号>] <cron表达式> <指令>
         示例: /添加任务 每日签到 0 9 * * * /签到
         """
         async for result in self._add_task_or_reminder(event, is_task=True):
@@ -1206,7 +1212,7 @@ class ReminderPlugin(Star):
     async def add_reminder(self, event: AstrMessageEvent):
         """添加定时提醒
         格式1（当前会话）: /添加提醒 <提醒名称> <cron表达式> <消息内容> [图片]
-        格式2（指定群聊/私聊）: /添加提醒 <提醒名称> [@<群号>|#<好友号>] <cron表达式> <消息内容> [图片]
+        格式2（指定私聊/群聊）: /添加提醒 <提醒名称> [@<好友号>|#<群号>] <cron表达式> <消息内容> [图片]
         示例: /添加提醒 每日提醒 0 9 * * * 早上好！[并附上图片]
         """
         async for result in self._add_task_or_reminder(event, is_task=False):
@@ -1282,14 +1288,7 @@ class ReminderPlugin(Star):
             if enabled_sessions:
                 info_text += "🎯 已启用会话:\n"
                 for s in enabled_sessions:
-                    if ':GroupMessage:' in s:
-                        group_id = s.split(':GroupMessage:')[1]
-                        info_text += f"- 群聊 {group_id}\n"
-                    elif ':FriendMessage:' in s:
-                        friend_id = s.split(':FriendMessage:')[1]
-                        info_text += f"- 私聊 {friend_id}\n"
-                    else:
-                        info_text += f"- {s}\n"
+                    info_text += f"- {describe_origin(s)}\n"
             else:
                 info_text += "🎯 当前未在任何会话启用\n"
 
@@ -1305,10 +1304,7 @@ class ReminderPlugin(Star):
                 info_text += f"\n📝 提醒内容:\n"
                 recall_after = int(target_item.get('recall_after_seconds', 0) or 0)
                 if recall_after > 0:
-                    h = recall_after // 3600
-                    m = (recall_after % 3600) // 60
-                    s = recall_after % 60
-                    info_text += f"⏪ 撤回时间: {h:02d}:{m:02d}:{s:02d}\n"
+                    info_text += f"⏪ 撤回时间: {format_duration_cn(recall_after)}\n"
 
             chain.append(Plain(info_text))
 
@@ -1391,10 +1387,7 @@ class ReminderPlugin(Star):
 
                     recall_after = int(item.get('recall_after_seconds', 0) or 0)
                     if recall_after > 0:
-                        h = recall_after // 3600
-                        m = (recall_after % 3600) // 60
-                        s = recall_after % 60
-                        result += f"   撤回: {h:02d}:{m:02d}:{s:02d}\n"
+                        result += f"   撤回: {format_duration_cn(recall_after)}\n"
 
                     # 显示链接的任务数量
                     reminder_name = item['name']
@@ -1553,21 +1546,40 @@ class ReminderPlugin(Star):
             if reminder_name not in self.linked_tasks:
                 self.linked_tasks[reminder_name] = []
 
-            # 提取消息中的 Face 和 At 组件
+            # 先解析 command 文本里的 [at:xxx]/[atall]，再与消息链中的 At 组件合并
+
+            parsed_command_structure = normalize_message_structure([{'type': 'text', 'content': command_with_args}])
+            normalized_command = collect_text_from_message_structure(parsed_command_structure).strip()
+            if normalized_command:
+                command_with_args = normalized_command
+            if not command_with_args:
+                yield event.plain_result("❌ 解析后指令为空，请至少保留实际命令文本")
+                return
+
+
             message_structure = []
+            for comp in parsed_command_structure:
+                if comp.get('type') in ('at', 'atall'):
+                    message_structure.append(comp)
+
             for msg_comp in event.get_messages():
                 if isinstance(msg_comp, At):
-                    message_structure.append({
-                        "type": "at",
-                        "qq": msg_comp.qq
-                    })
+                    qq = str(msg_comp.qq)
+                    if qq.lower() == 'all':
+                        message_structure.append({
+                            "type": "atall"
+                        })
+                    else:
+                        message_structure.append({
+                            "type": "at",
+                            "qq": qq
+                        })
                 elif isinstance(msg_comp, Face):
                     message_structure.append({
                         "type": "face",
                         "id": msg_comp.id
                     })
 
-            # 添加链接关系到列表
             linked_item = {
                 'command': command_with_args,
                 'message_structure': message_structure
@@ -1595,53 +1607,36 @@ class ReminderPlugin(Star):
         async for result in self._delete_item(event, str(key).strip(), delete_tasks=False):
             yield result
 
-    def _resolve_session_from_param(self, event: AstrMessageEvent, session_param: str | None) -> str | None:
-        if session_param and session_param.startswith('@'):
-            group_id = session_param[1:]
-            current_origin = event.unified_msg_origin
-            if ':' in current_origin:
-                platform = current_origin.split(':')[0]
-                return f"{platform}:GroupMessage:{group_id}"
-            return None
-
-        if session_param and session_param.startswith('#'):
-            friend_id = session_param[1:]
-            current_origin = event.unified_msg_origin
-            if ':' in current_origin:
-                platform = current_origin.split(':')[0]
-                return f"{platform}:FriendMessage:{friend_id}"
-            return None
-
-        current_origin = event.unified_msg_origin
-        if event.get_message_type() == MessageType.GROUP_MESSAGE:
-            if ":" in current_origin:
-                parts = current_origin.split(":", 1)
-                if len(parts) == 2 and "GroupMessage" not in current_origin and "FriendMessage" not in current_origin:
-                    return f"{parts[0]}:GroupMessage:{parts[1]}"
-                return current_origin
-            return current_origin
-        return current_origin
-
     async def _toggle_item_session(self, event: AstrMessageEvent, is_task: bool, enable: bool):
-        # 权限检查
         if not self._is_allowed(event):
             yield event.plain_result("❌ 抱歉，你没有权限使用该指令。")
             return
 
         parts = event.message_str.strip().split()
+        kind = "任务" if is_task else "提醒"
+        action = "启动" if enable else "停止"
+
         if len(parts) < 2:
-            kind = "任务" if is_task else "提醒"
-            action = "启动" if enable else "停止"
-            yield event.plain_result(f"❌ 参数缺失！\n用法: /{action}{kind} <{kind}名> [@群号|#好友号]")
+            yield event.plain_result(
+                f"❌ 参数缺失！\n用法: /{action}{kind} <{kind}名> [@好友号|#群号 ...]"
+            )
             return
 
-        cmd, name = parts[0], parts[1]
-        session_param = parts[2] if len(parts) >= 3 else None
+        name = parts[1]
+        session_params = parts[2:]
 
-        session = self._resolve_session_from_param(event, session_param)
-        if not session:
-            yield event.plain_result("❌ 无法识别当前平台信息，请检查会话参数（@群号 或 #好友号）")
-            return
+        if session_params:
+            invalid_params = [p for p in session_params if not p.startswith('@') and not p.startswith('#')]
+            if invalid_params:
+                invalid_str = " ".join(invalid_params)
+                yield event.plain_result(
+                    f"❌ 会话参数无效: {invalid_str}\n"
+                    f"用法: /{action}{kind} <{kind}名> [@好友号|#群号 ...]"
+                )
+                return
+            raw_targets = session_params
+        else:
+            raw_targets = [None]
 
         target_item = None
         for item in self.reminders:
@@ -1650,41 +1645,96 @@ class ReminderPlugin(Star):
                 break
 
         if not target_item:
-            kind = "任务" if is_task else "提醒"
             yield event.plain_result(f"❌ 未找到名为 '{name}' 的{kind}")
             return
 
-        enabled_sessions = target_item.get('enabled_sessions', [])
-        target_desc = "目标会话" if session_param and (
-                    session_param.startswith('@') or session_param.startswith('#')) else "当前会话"
+        resolved_sessions: List[str] = []
+        unresolved_targets: List[str] = []
+        seen_sessions = set()
 
-        if enable:
-            if session in enabled_sessions:
-                kind = "任务" if is_task else "提醒"
-                yield event.plain_result(f"❌ 该{kind}已在{target_desc}启用")
-                return
-            enabled_sessions.append(session)
-            target_item['enabled_sessions'] = enabled_sessions
-            self._add_job(target_item, session)
+        for raw_target in raw_targets:
+            resolved = resolve_session_origin(
+                event.unified_msg_origin,
+                event.get_message_type() == MessageType.GROUP_MESSAGE,
+                raw_target,
+            )
+            if not resolved:
+                unresolved_targets.append(raw_target or "当前会话")
+                continue
+            if resolved in seen_sessions:
+                continue
+            seen_sessions.add(resolved)
+            resolved_sessions.append(resolved)
+
+        if not resolved_sessions:
+            unresolved_str = " ".join(unresolved_targets) if unresolved_targets else "当前会话"
+            yield event.plain_result(
+                f"❌ 无法识别目标会话: {unresolved_str}\n"
+                "请检查会话参数（@好友号 或 #群号）"
+            )
+            return
+
+        enabled_sessions = list(target_item.get('enabled_sessions', []))
+        changed = False
+        success_sessions: List[str] = []
+        skipped_sessions: List[str] = []
+        unsupported_recall_sessions: List[str] = []
+
+        for session in resolved_sessions:
+            if enable:
+                if session in enabled_sessions:
+                    skipped_sessions.append(session)
+                    continue
+                enabled_sessions.append(session)
+                self._add_job(target_item, session)
+                success_sessions.append(session)
+                changed = True
+
+                if (not is_task) and int(target_item.get('recall_after_seconds', 0) or 0) > 0:
+                    recall_ok, recall_reason = self._check_recall_capability(session)
+                    if not recall_ok:
+                        unsupported_recall_sessions.append(f"{describe_origin(session)}（{recall_reason}）")
+            else:
+                if session not in enabled_sessions:
+                    skipped_sessions.append(session)
+                    continue
+                enabled_sessions.remove(session)
+                self._remove_job(target_item, session)
+                success_sessions.append(session)
+                changed = True
+
+        target_item['enabled_sessions'] = enabled_sessions
+        if changed:
             self._save_reminders()
-            kind = "任务" if is_task else "提醒"
-            yield event.plain_result(f"✅ 已在{target_desc}启动{kind}: {name}")
-        else:
-            if session not in enabled_sessions:
-                kind = "任务" if is_task else "提醒"
-                yield event.plain_result(f"❌ 该{kind}在{target_desc}尚未启用")
-                return
-            enabled_sessions.remove(session)
-            target_item['enabled_sessions'] = enabled_sessions
-            self._remove_job(target_item, session)
-            self._save_reminders()
-            kind = "任务" if is_task else "提醒"
-            yield event.plain_result(f"✅ 已在{target_desc}停止{kind}: {name}")
+
+        lines = [f"✅ {action}{kind}完成: {name}"]
+
+        if success_sessions:
+            lines.append(f"成功: {len(success_sessions)} 个会话")
+            for session in success_sessions:
+                lines.append(f"- {describe_target_origin(session, event.unified_msg_origin)}")
+
+        if skipped_sessions:
+            skipped_reason = "已启用" if enable else "未启用"
+            lines.append(f"跳过: {len(skipped_sessions)} 个会话（{skipped_reason}）")
+            for session in skipped_sessions:
+                lines.append(f"- {describe_target_origin(session, event.unified_msg_origin)}")
+
+        if unresolved_targets:
+            lines.append(f"无法识别: {' '.join(unresolved_targets)}")
+
+        if unsupported_recall_sessions:
+            lines.append(
+                "⚠️ 以下会话不支持自动撤回，将仅发送不撤回: "
+                + "、".join(unsupported_recall_sessions)
+            )
+
+        yield event.plain_result("\n".join(lines))
 
     @filter.command("启动提醒", alias={"启用提醒"})
     async def enable_reminder(self, event: AstrMessageEvent):
         """启动定时提醒
-        用法: /启动提醒 <提醒名称> [@群号|#好友号]
+        用法: /启动提醒 <提醒名称> [@好友号|#群号 ...]
         """
         async for result in self._toggle_item_session(event, is_task=False, enable=True):
             yield result
@@ -1692,7 +1742,7 @@ class ReminderPlugin(Star):
     @filter.command("停止提醒", alias={"终止提醒", "停用提醒"})
     async def disable_reminder(self, event: AstrMessageEvent):
         """停止定时提醒
-        用法: /停止提醒 <提醒名称> [@群号|#好友号]
+        用法: /停止提醒 <提醒名称> [@好友号|#群号 ...]
         """
         async for result in self._toggle_item_session(event, is_task=False, enable=False):
             yield result
@@ -1700,7 +1750,7 @@ class ReminderPlugin(Star):
     @filter.command("启动任务", alias={"启用任务"})
     async def enable_task(self, event: AstrMessageEvent):
         """启动定时任务
-        用法: /启动任务 <任务名称> [@群号|#好友号]
+        用法: /启动任务 <任务名称> [@好友号|#群号 ...]
         """
         async for result in self._toggle_item_session(event, is_task=True, enable=True):
             yield result
@@ -1708,7 +1758,7 @@ class ReminderPlugin(Star):
     @filter.command("停止任务", alias={"终止任务", "停用任务"})
     async def disable_task(self, event: AstrMessageEvent):
         """停止定时任务
-        用法: /停止任务 <任务名称> [@群号|#好友号]
+        用法: /停止任务 <任务名称> [@好友号|#群号 ...]
         """
         async for result in self._toggle_item_session(event, is_task=True, enable=False):
             yield result
@@ -1743,8 +1793,10 @@ class ReminderPlugin(Star):
                         msg_struct = cmd_data.get('message_structure', [])
                         face_count = sum(1 for x in msg_struct if x['type'] == 'face')
                         at_count = sum(1 for x in msg_struct if x['type'] == 'at')
+                        atall_count = sum(1 for x in msg_struct if x['type'] == 'atall')
                         if face_count: extras.append(f"表情{face_count}个")
                         if at_count: extras.append(f"At{at_count}人")
+                        if atall_count: extras.append(f"@全体{atall_count}次")
 
                     extra_str = f" ({' + '.join(extras)})" if extras else ""
                     result += f"   {i}. {cmd_str}{extra_str}\n"
@@ -1815,134 +1867,6 @@ class ReminderPlugin(Star):
 
         yield event.plain_result(f"✅ 已删除提醒 '{selected_reminder}' 的链接命令: {deleted_command}\n"
                                  f"该提醒当前还有 {len(commands) if selected_reminder in self.linked_tasks else 0} 个链接命令")
-
-    @filter.command("提醒帮助")
-    async def show_help(self, event: AstrMessageEvent):
-        """显示帮助信息"""
-        help_text = """📖 定时提醒助手使用帮助
-
-🔹 添加提醒
-用法1（当前会话）: /添加提醒 <名称> <cron表达式> <消息>
-用法2（指定群聊/私聊）: /添加提醒 <名称> [@<群号>|#<好友号>] <cron表达式> <消息>
-- 可选撤回: 在消息开头增加 HH:MM:SS，例如 00:01:00 表示发送后 1 分钟撤回
-- 全体艾特: 在消息内写 [atall]，发送时会转为 @全体成员（仅支持可用平台）
-- 指定艾特: 在消息内写 [at:123456789]，发送时会转为 @对应QQ号
-- cron表达式: 5段格式 (分 时 日 月 周)
-- 💡 不指定会话参数时，自动发送到当前会话
-- 💡 指定 @群号 时发送到对应群聊，指定 #好友号 时发送到对应私聊
-- 💡 发送指令时可以同时附上图片，提醒会包含文字+图片
-- 🔒 仅限Bot管理员或白名单用户使用
-
-基础示例:
-/添加提醒 早安 0 9 * * * 早上好！
-(每天9点在当前会话发送)
-
-/添加提醒 周报 @123456789 0 18 * * 5 本周工作总结
-(每周五18点在指定群聊发送，可实现远程控制)
-
-/添加提醒 晚点名 37 * * * * 00:01:00 [atall] 晚点名打卡啦！
-(每小时第37分钟发送，发送 1 分钟后自动撤回，并 @全体成员)
-
-/添加提醒 提醒某人 0 9 * * * [at:123456789] 记得提交日报
-(每天9点 @指定成员)
-
-⭐ 多时间点示例（用逗号分隔）:
-/添加提醒 喝水 0 9,14,18 * * * 记得喝水！
-(每天9点、14点、18点各发送一次)
-
-/添加提醒 课间休息 0 10,15,20 * * 1-5 该休息了
-(工作日10点、15点、20点发送)
-
-/添加提醒 整点报时 0 */2 * * * 当前时间...
-(每2小时发送)
-
-🔹 cron表达式详解
-格式: 分 时 日 月 周
-- 分: 0-59
-- 时: 0-23
-- 日: 1-31
-- 月: 1-12
-- 周: 0-6 (0=周日)
-
-特殊符号:
-- *: 任意值
-- */n: 每n个单位
-- a,b,c: 多个具体值（逗号分隔）
-- a-b: 范围值
-
-常用示例:
-0 9 * * * - 每天9点
-0 */2 * * * - 每2小时
-30 18 * * 1-5 - 工作日18:30
-0 0 1 * * - 每月1号0点
-0 9,12,18 * * * - 每天9点、12点、18点
-30 8-17/2 * * * - 8:30到17:30之间，每2小时
-
-🔹 添加任务
-用法1（当前会话）: /添加任务 <名称> <cron表达式> <指令>
-用法2（指定群聊/私聊）: /添加任务 <名称> [@<群号>|#<好友号>] <cron表达式> <指令>
-- cron表达式: 5段格式 (分 时 日 月 周)
-- 指令: 以指令前缀（如/）开头的指令，允许空格接参数
-- 💡 不指定会话参数时，自动在当前会话启用
-- 💡 指定 @群号 时只在对应群聊启用，指定 #好友号 时只在对应私聊启用
-- 🔒 仅限Bot管理员或白名单用户使用
-
-基础示例:
-/添加任务 每日签到 0 9 * * * /签到
-(每天9点在当前会话执行签到指令)
-
-/添加任务 群签到 @123456789 0 9 * * * /签到
-(每天9点在指定群聊执行签到指令)
-
-🔹 启动/停止提醒与任务
-/启动提醒 <提醒名称> [@群号|#好友号] - 在当前会话或指定会话启用提醒
-/停止提醒 <提醒名称> [@群号|#好友号] - 在当前会话或指定会话停止提醒
-/启动任务 <任务名称> [@群号|#好友号] - 在当前会话或指定会话启用任务
-/停止任务 <任务名称> [@群号|#好友号] - 在当前会话或指定会话停止任务
-
-🔹 查看提醒
-/查看提醒 - 查看所有提醒任务列表
-/查看提醒 <序号或提醒名称> - 查看指定提醒的详细内容（包含完整文字和图片）
-
-🔹 查看任务
-/查看任务 - 查看所有任务列表
-/查看任务 <序号或任务名称> - 查看指定任务的详细信息
-
-🔹 编辑提醒/任务
-/编辑提醒 <提醒名称> <cron表达式> <消息内容>
-/编辑任务 <任务名称> <cron表达式> <指令>
-- 说明: 不接受会话参数，仅修改规则与内容
-- 说明: 编辑后会自动重建所有已启用该提醒/任务的会话任务
-
-🔹 删除提醒
-/删除提醒 <序号或提醒名称>
-
-🔹 删除任务
-/删除任务 <序号或任务名称>
-
-🔹 链接提醒
-/链接提醒 <提醒名称> <指令> [参数可选]
-- 说明: 当指定的提醒执行后，会自动执行指定的指令
-- 示例: /链接提醒 早安 /签到
-- 💡 指令需以指令前缀（如/）开头
-- 💡 支持为同一个提醒链接多个指令，将按添加顺序依次执行
-- 💡 现在允许同一个指令链接多次
-
-🔹 查看链接
-/查看链接
-- 说明: 查看所有已链接的任务
-- 用途: 管理和查看当前所有的链接任务关系
-
-🔹 删除链接
-/删除链接 <提醒序号> <命令序号>
-- 说明: 删除指定的链接任务
-- 示例: /删除链接 1 1 (删除第1个有链接的提醒的第1个链接命令)
-- 用途: 精确管理链接任务，删除不需要的链接
-
-🔹 帮助
-/提醒帮助
-"""
-        yield event.plain_result(help_text)
 
     async def terminate(self):
         """插件卸载时强制清理所有任务"""
