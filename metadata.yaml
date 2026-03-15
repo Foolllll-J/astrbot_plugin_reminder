@@ -1,6 +1,6 @@
 name: astrbot_plugin_reminder
 display_name: 定时提醒助手
-desc: 支持在指定会话定时发送消息或执行任务，支持富媒体消息、艾特解析与自动撤回。
-version: v1.2.0
+desc: 支持在指定会话定时发送提醒消息或执行指令任务，支持富媒体内容（如视频、语音等）、艾特解析与自动撤回。
+version: v1.3.0
 author: Foolllll
 repo: https://github.com/Foolllll-J/astrbot_plugin_reminder
