@@ -29,18 +29,44 @@ class TaskManager:
     async def add_task(self, event: AstrMessageEvent) -> AsyncGenerator[str, None]:
         """添加定时任务"""
         try:
+            from .utils import resolve_session_origin
+            from astrbot.core.platform.astrbot_message import MessageType
+            import re
+
             parts = event.message_str.strip().split(maxsplit=2)
             if len(parts) < 3:
-                yield "❌ 参数缺失！用法: /添加任务 <任务名称> <cron表达式> <指令>\n示例: /添加任务 每日签到 0 9 * * * /签到"
+                yield "❌ 参数缺失！用法: /添加任务 <任务名称> <cron表达式> <指令>"
                 return
 
             _, name, remaining = parts
+
+            # 名称合法性检查
+            if re.fullmatch(r"\d+", name):
+                yield "❌ 任务名称不能为纯阿拉伯数字"
+                return
+
+            # 尝试解析是否包含目标会话（@好友号 或 #群号）
+            remaining_parts = remaining.split(maxsplit=1)
+            session_param = None
+            if len(remaining_parts) >= 2 and remaining_parts[0].startswith(('@', '#')):
+                session_param = remaining_parts[0]
+                remaining = remaining_parts[1]
+
+            target_origin = resolve_session_origin(
+                event.unified_msg_origin,
+                event.get_message_type() == MessageType.GROUP_MESSAGE,
+                session_param,
+            )
+
+            if not target_origin:
+                yield "❌ 无法识别当前平台信息，请使用当前会话模式"
+                return
 
             # 解析cron和指令
             cron_expr, command = self._parse_cron_and_command(remaining)
 
             if not cron_expr:
-                yield "cron表达式格式错误！需要5段: 分 时 日 月 周\n示例: 0 9 * * * 表示每天9点0分"
+                yield "cron表达式格式错误！需要5段: 分 时 日 月 周"
                 return
 
             # 验证cron表达式
@@ -61,7 +87,7 @@ class TaskManager:
                 'name': name,
                 'is_task': True,
                 'cron_expr': cron_expr,
-                'enabled_sessions': [event.unified_msg_origin],
+                'enabled_sessions': [target_origin],
                 'created_by': event.get_sender_id(),
                 'creator_name': event.get_sender_name(),
                 'is_admin': event.is_admin(),
@@ -80,7 +106,7 @@ class TaskManager:
             # 保存数据
             self.plugin._save_reminders()
 
-            yield f"✅ 任务 '{name}' 添加成功！\n📅 Cron: {cron_expr}\n📍 目标: {describe_origin(event.unified_msg_origin)}"
+            yield f"✅ 任务 '{name}' 添加成功！\n📅 Cron: {cron_expr}\n📍 目标: {describe_origin(target_origin)}"
 
         except Exception as e:
             logger.error(f"添加任务失败: {e}", exc_info=True)
@@ -299,7 +325,7 @@ class TaskManager:
                 if enabled_sessions:
                     info_text += "🎯 已启用会话:\n"
                     for s in enabled_sessions:
-                        info_text += f"- {describe_origin(s)}\n"
+                        info_text += f"{describe_origin(s)}\n"
                 else:
                     info_text += "🎯 当前未在任何会话启用\n"
 
@@ -591,3 +617,50 @@ class TaskManager:
         item['command'] = final_command
         if message_structure:
             item['message_structure'] = message_structure
+
+    async def execute_now(self, event: AstrMessageEvent) -> AsyncGenerator[str, None]:
+        """立即执行任务"""
+        try:
+            import re
+
+            # 解析参数
+            parts = event.message_str.strip().split(maxsplit=1)
+            if len(parts) < 2:
+                yield "❌ 参数缺失！用法: /执行任务 <任务名称或序号>"
+                return
+
+            key = parts[1].strip()
+
+            # 查找任务
+            item = None
+            if re.fullmatch(r"\d+", key):
+                # 按序号查找
+                index = int(key) - 1
+                task_list = [i for i in self.plugin.reminders if i.get('is_task', False)]
+                if 0 <= index < len(task_list):
+                    item = task_list[index]
+            else:
+                # 按名称查找
+                for i in self.plugin.reminders:
+                    if i.get('name') == key and i.get('is_task', False):
+                        item = i
+                        break
+
+            if not item:
+                yield f"❌ 未找到任务: {key}"
+                return
+
+            # 在所有启用的会话中执行
+            enabled_sessions = item.get('enabled_sessions', [])
+            if not enabled_sessions:
+                yield f"❌ 任务 '{item.get('name')}' 未在任何会话启用"
+                return
+
+            for session in enabled_sessions:
+                await self.execute_task(item, session)
+
+            yield f"✅ 任务 '{item.get('name')}' 已在 {len(enabled_sessions)} 个会话中执行"
+
+        except Exception as e:
+            logger.error(f"执行任务失败: {e}", exc_info=True)
+            yield f"❌ 执行任务失败: {e}"

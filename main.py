@@ -1,9 +1,10 @@
-from astrbot.api.event import filter, AstrMessageEvent
+from astrbot.api.event import filter, AstrMessageEvent, MessageChain
 from astrbot.api.star import Context, Star, StarTools
 from astrbot.api import logger
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 import os
 from typing import Dict, List
+from astrbot.api.message_components import Plain
 
 from .core.utils import (
     load_reminders,
@@ -99,6 +100,24 @@ class ReminderPlugin(Star):
         """检查目标会话是否支持自动撤回"""
         return check_recall_capability(self, unified_msg_origin)
 
+    async def _notify_recall_not_supported_once(self, item: Dict, unified_msg_origin: str, reason: str):
+        """在执行期对同一提醒+会话仅提示一次"不支持自动撤回"。"""
+        item_id = item.get('id') or item.get('name', 'unknown')
+        notice_key = f"{item_id}::{unified_msg_origin}"
+        if notice_key in self._recall_notice_sent:
+            return
+        self._recall_notice_sent.add(notice_key)
+
+        try:
+            reminder_name = item.get('name', '未命名提醒')
+            message_chain = MessageChain()
+            message_chain.chain = [
+                Plain(f"⚠️ 提醒「{reminder_name}」已配置自动撤回，但{reason}，将仅发送不撤回。")
+            ]
+            await self.context.send_message(unified_msg_origin, message_chain)
+        except Exception as e:
+            logger.warning(f"发送\"自动撤回不支持\"提示失败: {e}")
+
     async def _send_aiocqhttp_with_message_id(self, item: Dict, unified_msg_origin: str):
         """使用 aiocqhttp 发送消息并返回 message_id"""
         return await send_aiocqhttp_with_message_id(self, item, unified_msg_origin)
@@ -117,10 +136,6 @@ class ReminderPlugin(Star):
     async def add_task(self, event: AstrMessageEvent):
         """添加定时任务
         用法: /添加任务 <任务名称> [@好友号|#群号] <cron表达式> <指令>
-        示例: /添加任务 每日签到 0 9 * * * /签到
-        说明: cron表达式为5段格式：分 时 日 月 周
-        💡 可以在发送指令的同时附上图片
-        💡 不指定会话参数时，会自动发送到当前会话
         """
         from .core.task_manager import TaskManager
         task_manager = TaskManager(self)
@@ -131,11 +146,6 @@ class ReminderPlugin(Star):
     async def add_reminder(self, event: AstrMessageEvent):
         """添加定时提醒
         用法: /添加提醒 <提醒名称> [@好友号|#群号] <cron表达式> <消息内容> [图片]
-        示例: /添加提醒 早安 0 9 * * * 早上好！
-        说明: cron表达式为5段格式：分 时 日 月 周
-        💡 可以在发送指令的同时附上图片，提醒时会一起发送文字和图片
-        💡 支持在消息内容前添加撤回时间，如：/添加提醒 测试 0 9 * * * 2m测试消息
-        💡 不指定会话参数时，会自动发送到当前会话
         """
         from .core.reminder_manager import ReminderManager
         reminder_manager = ReminderManager(self)
@@ -146,14 +156,6 @@ class ReminderPlugin(Star):
     async def edit_task(self, event: AstrMessageEvent):
         """编辑定时任务
         用法: /编辑任务 <任务名称或序号> [@好友号|#群号] [cron表达式] [指令]
-        说明: 所有参数都可选，可单独或组合编辑，支持使用序号或名称
-        示例1: /编辑任务 每日签到 0 8 * * * (只修改时间)
-        示例2: /编辑任务 1 /新指令 (使用序号修改指令)
-        示例3: /编辑任务 每日签到 0 8 * * * /新指令 (同时修改时间和指令)
-        示例4: /编辑任务 每日签到 @123456 (只修改会话，覆盖原有会话)
-        示例5: /编辑任务 2 @123456 0 8 * * * (使用序号同时修改会话和时间)
-        💡 序号可通过 /查看任务 获取
-        💡 编辑会话时会完全替换原有的会话列表，如需增量管理请使用启动/停止指令
         """
         from .core.task_manager import TaskManager
         task_manager = TaskManager(self)
@@ -164,16 +166,6 @@ class ReminderPlugin(Star):
     async def edit_reminder(self, event: AstrMessageEvent):
         """编辑定时提醒
         用法: /编辑提醒 <提醒名称或序号> [@好友号|#群号] [cron表达式] [消息内容]
-        说明: 所有参数都可选，可单独或组合编辑，支持使用序号或名称
-        示例1: /编辑提醒 早安 0 8 * * * (只修改时间)
-        示例2: /编辑提醒 1 新的内容 (使用序号只修改内容)
-        示例3: /编辑提醒 早安 0 8 * * * 新的内容 (同时修改时间和内容)
-        示例4: /编辑提醒 早安 @123456 (只修改会话，覆盖原有会话)
-        示例5: /编辑提醒 2 @123456 0 8 * * * 新的内容 (使用序号同时修改会话、时间和内容)
-        💡 可以在发送指令的同时附上图片，提醒时会更新发送的文字和图片
-        💡 支持在消息内容前添加撤回时间，如：2m测试消息
-        💡 序号可通过 /查看提醒 获取
-        💡 编辑会话时会完全替换原有的会话列表，如需增量管理请使用启动/停止指令
         """
         from .core.reminder_manager import ReminderManager
         reminder_manager = ReminderManager(self)
@@ -196,14 +188,15 @@ class ReminderPlugin(Star):
     async def list_reminders(self, event: AstrMessageEvent, name: str = ""):
         """查看定时提醒
         用法1: /查看提醒 - 查看所有提醒列表
-        用法2: /查看提醒 <序号> - 查看指定序号提醒的详细信息（包含完整文字和图片）
-        用法3: /查看提醒 <提醒名称> - 查看指定名称提醒的详细信息（包含完整文字和图片）
+        用法2: /查看提醒 <序号> - 查看指定序号提醒的详细信息
+        用法3: /查看提醒 <提醒名称> - 查看指定名称提醒的详细信息
         """
         from .core.reminder_manager import ReminderManager
         reminder_manager = ReminderManager(self)
         async for result in reminder_manager.list_reminders(event, name):
             # 检查是否是消息链
             if isinstance(result, dict) and result.get("type") == "message_chain":
+                # 直接传递 list，与重构前保持一致
                 yield event.chain_result(result["data"])
             else:
                 yield event.plain_result(result)
@@ -212,8 +205,6 @@ class ReminderPlugin(Star):
     async def delete_task(self, event: AstrMessageEvent, key: str = None):
         """删除定时任务
         用法: /删除任务 <序号或名称>
-        示例1: /删除任务 1 (删除第1个任务)
-        示例2: /删除任务 每日签到 (删除名为"每日签到"的任务)
         """
         if key is None:
             yield event.plain_result("❌ 参数缺失！\n用法: /删除任务 <序号或名称>")
@@ -227,8 +218,6 @@ class ReminderPlugin(Star):
     async def delete_reminder(self, event: AstrMessageEvent, key: str = None):
         """删除定时提醒
         用法: /删除提醒 <序号或名称>
-        示例1: /删除提醒 1 (删除第1个提醒)
-        示例2: /删除提醒 早安 (删除名为"早安"的提醒)
         """
         if key is None:
             yield event.plain_result("❌ 参数缺失！\n用法: /删除提醒 <序号或名称>")
@@ -238,14 +227,30 @@ class ReminderPlugin(Star):
         async for result in reminder_manager.delete_reminder(event, str(key).strip()):
             yield event.plain_result(result)
 
+    @filter.command("执行任务")
+    async def execute_task_now(self, event: AstrMessageEvent):
+        """立即执行任务
+        用法: /执行任务 <任务名称或序号>
+        """
+        from .core.task_manager import TaskManager
+        task_manager = TaskManager(self)
+        async for result in task_manager.execute_now(event):
+            yield event.plain_result(result)
+
+    @filter.command("发送提醒")
+    async def send_reminder_now(self, event: AstrMessageEvent):
+        """立即发送提醒
+        用法: /发送提醒 <提醒名称或序号>
+        """
+        from .core.reminder_manager import ReminderManager
+        reminder_manager = ReminderManager(self)
+        async for result in reminder_manager.send_now(event):
+            yield event.plain_result(result)
 
     @filter.command("链接提醒")
     async def link_reminder_to_task(self, event: AstrMessageEvent):
         """链接提醒到任务，提醒执行后执行指定指令
-        用法: /链接提醒 <提醒名称> <指令> [参数可选]
-        示例: /链接提醒 早安 /签到
-        说明: 当提醒「早安」执行后，会自动执行指令「/签到」
-        💡 支持为同一个提醒链接多个指令，将按添加顺序依次执行
+        用法: /链接提醒 <提醒名称> <指令>
         """
         from .core.linked_task_manager import LinkedTaskManager
         linked_task_manager = LinkedTaskManager(self)
@@ -258,7 +263,6 @@ class ReminderPlugin(Star):
         """启动定时提醒
         用法1: /启动提醒 <提醒名称> - 在当前会话启动该提醒
         用法2: /启动提醒 <提醒名称> [@好友号|#群号 ...] - 在指定会话启动该提醒
-        示例: /启动提醒 早安 #123456 (在群123456中启动"早安"提醒)
         """
         from .core.reminder_manager import ReminderManager
         reminder_manager = ReminderManager(self)
@@ -270,7 +274,6 @@ class ReminderPlugin(Star):
         """停止定时提醒
         用法1: /停止提醒 <提醒名称> - 在当前会话停止该提醒
         用法2: /停止提醒 <提醒名称> [@好友号|#群号 ...] - 在指定会话停止该提醒
-        示例: /停止提醒 早安 #123456 (在群123456中停止"早安"提醒)
         """
         from .core.reminder_manager import ReminderManager
         reminder_manager = ReminderManager(self)
@@ -282,7 +285,6 @@ class ReminderPlugin(Star):
         """启动定时任务
         用法1: /启动任务 <任务名称> - 在当前会话启动该任务
         用法2: /启动任务 <任务名称> [@好友号|#群号 ...] - 在指定会话启动该任务
-        示例: /启动任务 每日签到 #123456 (在群123456中启动"每日签到"任务)
         """
         from .core.task_manager import TaskManager
         task_manager = TaskManager(self)
@@ -294,7 +296,6 @@ class ReminderPlugin(Star):
         """停止定时任务
         用法1: /停止任务 <任务名称> - 在当前会话停止该任务
         用法2: /停止任务 <任务名称> [@好友号|#群号 ...] - 在指定会话停止该任务
-        示例: /停止任务 每日签到 #123456 (在群123456中停止"每日签到"任务)
         """
         from .core.task_manager import TaskManager
         task_manager = TaskManager(self)
@@ -317,7 +318,6 @@ class ReminderPlugin(Star):
         """删除指定的链接任务
         用法1: /删除链接 - 交互式删除，显示所有链接任务列表
         用法2: /删除链接 <提醒序号> <任务序号> - 直接删除指定链接任务
-        示例: /删除链接 1 1 (删除第1个有链接的提醒的第1个链接命令)
         """
         from .core.linked_task_manager import LinkedTaskManager
         linked_task_manager = LinkedTaskManager(self)

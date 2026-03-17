@@ -4,9 +4,10 @@
 
 from typing import Dict, List, Optional, AsyncGenerator
 from astrbot.api import logger
-from astrbot.api.event import AstrMessageEvent
+from astrbot.api.event import AstrMessageEvent, MessageChain
 from apscheduler.triggers.cron import CronTrigger
 import os
+import asyncio
 
 from .utils import (
     build_job_id,
@@ -18,6 +19,8 @@ from .utils import (
     parse_recall_seconds,
     translate_to_apscheduler_cron,
     build_message_chain_from_structure,
+    split_message_structure,
+    extract_message_id,
 )
 
 
@@ -30,18 +33,44 @@ class ReminderManager:
     async def add_reminder(self, event: AstrMessageEvent) -> AsyncGenerator[str, None]:
         """添加定时提醒"""
         try:
+            from .utils import resolve_session_origin
+            from astrbot.core.platform.astrbot_message import MessageType
+            import re
+
             parts = event.message_str.strip().split(maxsplit=2)
             if len(parts) < 3:
-                yield "❌ 参数缺失！用法: /添加提醒 <提醒名称> <cron表达式> <消息内容> [图片]\n示例: /添加提醒 每日提醒 0 9 * * * 早上好！"
+                yield "❌ 参数缺失！用法: /添加提醒 <提醒名称> <cron表达式> <消息内容> [图片]"
                 return
 
             _, name, remaining = parts
+
+            # 名称合法性检查
+            if re.fullmatch(r"\d+", name):
+                yield "❌ 提醒名称不能为纯阿拉伯数字"
+                return
+
+            # 尝试解析是否包含目标会话（@好友号 或 #群号）
+            remaining_parts = remaining.split(maxsplit=1)
+            session_param = None
+            if len(remaining_parts) >= 2 and remaining_parts[0].startswith(('@', '#')):
+                session_param = remaining_parts[0]
+                remaining = remaining_parts[1]
+
+            target_origin = resolve_session_origin(
+                event.unified_msg_origin,
+                event.get_message_type() == MessageType.GROUP_MESSAGE,
+                session_param,
+            )
+
+            if not target_origin:
+                yield "❌ 无法识别当前平台信息，请使用当前会话模式"
+                return
 
             # 解析cron和内容
             cron_expr, content_text = self._parse_cron_and_content(remaining)
 
             if not cron_expr:
-                yield "cron表达式格式错误！需要5段: 分 时 日 月 周\n示例: 0 9 * * * 表示每天9点0分"
+                yield "cron表达式格式错误！需要5段: 分 时 日 月 周"
                 return
 
             # 验证cron表达式
@@ -62,7 +91,7 @@ class ReminderManager:
                 'name': name,
                 'is_task': False,
                 'cron_expr': cron_expr,
-                'enabled_sessions': [event.unified_msg_origin],
+                'enabled_sessions': [target_origin],
                 'created_by': event.get_sender_id(),
                 'creator_name': event.get_sender_name(),
                 'is_admin': event.is_admin(),
@@ -85,7 +114,7 @@ class ReminderManager:
             if item.get('recall_after_seconds', 0) > 0:
                 recall_info = f"\n⏰ 撤回: {format_duration_cn(item['recall_after_seconds'])}"
 
-            yield f"✅ 提醒 '{name}' 添加成功！\n📅 Cron: {cron_expr}\n📍 目标: {describe_origin(event.unified_msg_origin)}{recall_info}"
+            yield f"✅ 提醒 '{name}' 添加成功！\n📅 Cron: {cron_expr}\n📍 目标: {describe_origin(target_origin)}{recall_info}"
 
         except Exception as e:
             logger.error(f"添加提醒失败: {e}", exc_info=True)
@@ -181,9 +210,6 @@ class ReminderManager:
                     target_item['enabled_sessions'] = new_sessions
                     session_changed = True
 
-                    # 重新调度
-                    await self.plugin._reschedule_reminder(target_item)
-
             # 重新组合剩余参数用于解析cron和内容
             remaining = ' '.join(filtered_remaining)
 
@@ -198,7 +224,6 @@ class ReminderManager:
             # 更新cron表达式
             if cron_expr:
                 target_item['cron_expr'] = cron_expr
-                await self.plugin._reschedule_reminder(target_item)
 
             # 更新内容
             if content_text:
@@ -206,6 +231,10 @@ class ReminderManager:
 
             # 保存更新
             self.plugin._save_reminders()
+
+            # 如果有任何变更，重新调度
+            if session_changed or cron_expr:
+                await self.plugin._reschedule_reminder(target_item)
 
             updates = []
             if session_changed:
@@ -324,7 +353,7 @@ class ReminderManager:
                     yield f"❌ 未找到名为 '{params}' 的提醒\n\n💡 使用 /查看提醒 查看所有提醒列表"
                     return
 
-                # 构建详情消息（包装为消息链）
+                # 构建详情消息
                 from .utils import split_message_structure
                 from astrbot.api.message_components import Plain
 
@@ -333,7 +362,7 @@ class ReminderManager:
                 if enabled_sessions:
                     info_text += "🎯 已启用会话:\n"
                     for s in enabled_sessions:
-                        info_text += f"- {describe_origin(s)}\n"
+                        info_text += f"{describe_origin(s)}\n"
                 else:
                     info_text += "🎯 当前未在任何会话启用\n"
 
@@ -345,25 +374,28 @@ class ReminderManager:
                 if recall_after > 0:
                     info_text += f"⏪ 撤回时间: {format_duration_cn(recall_after)}\n"
 
-                # 返回详情文本（包装为消息链）
-                yield {"type": "message_chain", "data": [Plain(info_text)]}
+                # 构建完整的消息链
+                message_components = [Plain(info_text)]
 
-                # 返回内容预览
-                for chunk in split_message_structure(target_item['message_structure']):
+                # 添加内容预览到同一消息
+                chunks = split_message_structure(target_item['message_structure'])
+                for chunk in chunks:
                     preview_chain = build_message_chain_from_structure(chunk, self.plugin.data_dir, logger)
                     if preview_chain:
-                        # 标记这是消息链，需要特殊处理
-                        yield {"type": "message_chain", "data": preview_chain}
+                        message_components.extend(preview_chain)
 
-                # 显示链接的任务
+                # 添加链接任务信息
                 reminder_name = target_item['name']
                 if reminder_name in self.plugin.linked_tasks and self.plugin.linked_tasks[reminder_name]:
                     linked_commands = self.plugin.linked_tasks[reminder_name]
-                    linked_info = f"🔆 {target_item['name']} 已链接的任务:\n"
+                    linked_info = f"\n\n🔆 {target_item['name']} 已链接的任务:\n"
                     for i, cmd_data in enumerate(linked_commands, 1):
                         cmd_str = cmd_data if isinstance(cmd_data, str) else cmd_data.get('command', '')
                         linked_info += f"  {i}. {cmd_str}\n"
-                    yield linked_info
+                    message_components.append(Plain(linked_info))
+
+                # 一次性返回完整消息链
+                yield {"type": "message_chain", "data": message_components}
             else:
                 # 显示所有提醒列表（简略信息）
                 result = f"📋 当前提醒列表:\n\n"
@@ -518,24 +550,72 @@ class ReminderManager:
                 logger.warning(f"提醒 '{item.get('name')}' 没有内容，跳过发送")
                 return
 
-            # 构建消息链
-            message_chain = build_message_chain_from_structure(
-                message_structure,
-                self.plugin.data_dir
-            )
+            # 按平台限制拆分消息
+            message_chunks = split_message_structure(message_structure)
 
-            if not message_chain:
-                logger.warning(f"提醒 '{item.get('name')}' 消息链构建失败")
+            if not message_chunks:
+                logger.warning(f"提醒 '{item.get('name')}' 消息为空")
                 return
 
-            # 发送消息
-            await self.plugin.context.send_message(session, message_chain)
+            recall_after_seconds = int(item.get('recall_after_seconds', 0) or 0)
+            message_ids: List[int | str] = []
+
+            # 检查撤回支持
+            recall_supported = False
+            recall_reason = ""
+            if recall_after_seconds > 0:
+                recall_supported, recall_reason = self.plugin._check_recall_capability(session)
+                if not recall_supported:
+                    logger.warning(
+                        f"提醒 '{item.get('name', 'unknown')}' 配置了自动撤回，但{recall_reason}，本次仅发送不撤回")
+                    await self.plugin._notify_recall_not_supported_once(item, session, recall_reason)
+
+            for chunk in message_chunks:
+                chain = build_message_chain_from_structure(
+                    chunk,
+                    self.plugin.data_dir,
+                    logger
+                )
+
+                if not chain:
+                    continue
+
+                message_id = None
+                if recall_after_seconds > 0 and recall_supported:
+                    message_id = await self.plugin._send_aiocqhttp_with_message_id(
+                        {'message_structure': chunk},
+                        session,
+                    )
+
+                if message_id is None:
+                    message_chain = MessageChain()
+                    message_chain.chain = chain
+                    send_ret = await self.plugin.context.send_message(session, message_chain)
+                    message_id = extract_message_id(send_ret)
+
+                if message_id is not None:
+                    message_ids.append(message_id)
+
+            if recall_after_seconds > 0 and recall_supported:
+                if message_ids:
+                    for message_id in message_ids:
+                        asyncio.create_task(
+                            self.plugin._recall_message_later(session, message_id, recall_after_seconds))
+                else:
+                    logger.warning(f"提醒已发送但未拿到 message_id，无法自动撤回: {item.get('name')}")
+
             logger.info(f"提醒 '{item.get('name')}' 已发送到 {session}")
 
-            # 处理撤回
-            recall_after_seconds = item.get('recall_after_seconds', 0)
-            if recall_after_seconds > 0:
-                await self._handle_recall(item, session, recall_after_seconds)
+            # 处理链接任务
+            linked_commands = self.plugin.linked_tasks.get(item.get('name'), [])
+            if linked_commands:
+                tasks = []
+                for linked_command in linked_commands:
+                    task = asyncio.create_task(self._execute_linked_command(linked_command, session, item))
+                    tasks.append(task)
+
+                if tasks:
+                    await asyncio.gather(*tasks, return_exceptions=True)
 
         except Exception as e:
             logger.error(f"发送提醒 '{item.get('name')}' 时出错: {e}", exc_info=True)
@@ -688,3 +768,93 @@ class ReminderManager:
 
         item['message_structure'] = message_structure
         item['recall_after_seconds'] = recall_after_seconds or 0
+
+    async def _execute_linked_command(self, linked_task_data: str | Dict, unified_msg_origin: str, item: Dict):
+        """执行单个链接任务"""
+        from astrbot.api.message_components import At, Face, Plain
+        from .utils import normalize_message_structure, collect_text_from_message_structure
+
+        is_admin = item.get('is_admin', True)
+        self_id = item.get('self_id')
+
+        command = ""
+        original_components = []
+
+        if isinstance(linked_task_data, str):
+            command = linked_task_data
+        elif isinstance(linked_task_data, dict):
+            command = linked_task_data.get('command', '')
+            # 还原组件，并兼容历史占位写法（[at:xxx]/[atall]）
+            message_structure = linked_task_data.get('message_structure', [])
+            if isinstance(message_structure, list):
+                message_structure = normalize_message_structure(message_structure)
+                for comp in message_structure:
+                    if comp['type'] == 'at':
+                        original_components.append(At(qq=comp['qq']))
+                    elif comp['type'] == 'atall':
+                        original_components.append(At(qq="all"))
+                    elif comp['type'] == 'face':
+                        original_components.append(Face(id=comp['id']))
+
+        # 兼容历史链接任务：也从 command 文本中解析 [at:xxx]/[atall]
+        cmd_structure = normalize_message_structure([{'type': 'text', 'content': command}])
+        parsed_command = collect_text_from_message_structure(cmd_structure).strip()
+        if parsed_command:
+            command = parsed_command
+        for comp in cmd_structure:
+            if comp.get('type') == 'at':
+                original_components.append(At(qq=comp.get('qq', '')))
+            elif comp.get('type') == 'atall':
+                original_components.append(At(qq="all"))
+
+        if command:
+            await self.plugin._execute_command_common(command, unified_msg_origin, item, "链接任务",
+                                                       original_components=original_components, is_admin=is_admin,
+                                                       self_id=self_id)
+
+    async def send_now(self, event: AstrMessageEvent) -> AsyncGenerator[str, None]:
+        """立即发送提醒"""
+        try:
+            import re
+
+            # 解析参数
+            parts = event.message_str.strip().split(maxsplit=1)
+            if len(parts) < 2:
+                yield "❌ 参数缺失！用法: /发送提醒 <提醒名称或序号>"
+                return
+
+            key = parts[1].strip()
+
+            # 查找提醒
+            item = None
+            if re.fullmatch(r"\d+", key):
+                # 按序号查找
+                index = int(key) - 1
+                reminder_list = [i for i in self.plugin.reminders if not i.get('is_task', False)]
+                if 0 <= index < len(reminder_list):
+                    item = reminder_list[index]
+            else:
+                # 按名称查找
+                for i in self.plugin.reminders:
+                    if i.get('name') == key and not i.get('is_task', False):
+                        item = i
+                        break
+
+            if not item:
+                yield f"❌ 未找到提醒: {key}"
+                return
+
+            # 在所有启用的会话中发送
+            enabled_sessions = item.get('enabled_sessions', [])
+            if not enabled_sessions:
+                yield f"❌ 提醒 '{item.get('name')}' 未在任何会话启用"
+                return
+
+            for session in enabled_sessions:
+                await self.send_reminder(item, session)
+
+            yield f"✅ 提醒 '{item.get('name')}' 已发送到 {len(enabled_sessions)} 个会话"
+
+        except Exception as e:
+            logger.error(f"发送提醒失败: {e}", exc_info=True)
+            yield f"❌ 发送提醒失败: {e}"

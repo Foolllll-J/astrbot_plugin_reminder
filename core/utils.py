@@ -5,6 +5,7 @@ from collections.abc import Awaitable, Callable
 from typing import Any, Dict, List, Optional
 from apscheduler.triggers.cron import CronTrigger
 from astrbot.api import logger
+from astrbot.api.event import MessageChain
 from astrbot.api.message_components import Image, Record, Video
 
 
@@ -185,7 +186,7 @@ async def extract_inline_message_structure(
                 cron_found = True
 
                 if content.strip():
-                    message_structure.append({"type": "text", "content": content})
+                    message_structure.append({"type": "text", "content": content.lstrip()})
             elif cron_found and msg_comp.text.strip():
                 message_structure.append({"type": "text", "content": msg_comp.text})
         elif not cron_found:
@@ -281,10 +282,10 @@ def describe_origin(unified_msg_origin: str) -> str:
     """将统一会话 ID 格式化为可读描述。"""
     if ":GroupMessage:" in unified_msg_origin:
         group_id = unified_msg_origin.split(":GroupMessage:", 1)[1]
-        return f"群聊 {group_id}"
+        return f"👥 群聊 {group_id}"
     if ":FriendMessage:" in unified_msg_origin:
         friend_id = unified_msg_origin.split(":FriendMessage:", 1)[1]
-        return f"私聊 {friend_id}"
+        return f"👤 私聊 {friend_id}"
     return unified_msg_origin
 
 
@@ -611,8 +612,12 @@ def remove_all_jobs_for_item(plugin, item: Dict):
             ]
 
             for jid in jobs_to_remove:
-                if jid in plugin.scheduler.get_jobs():
+                try:
                     plugin.scheduler.remove_job(jid)
+                    logger.info(f"已移除调度任务: {jid}")
+                except Exception:
+                    # 任务不存在时的正常情况，静默处理
+                    pass
                 if jid in plugin.job_mapping:
                     del plugin.job_mapping[jid]
 
@@ -654,22 +659,41 @@ async def reschedule_reminder(plugin, item: Dict):
 
 
 def get_platform_adapter_name(plugin, platform_id: str) -> str:
-    """获取平台适配器名称"""
+    """将 unified_msg_origin 里的平台实例ID解析为适配器名（如 aiocqhttp）。"""
+    if not platform_id:
+        return ""
+
+    platform_inst = plugin.context.get_platform_inst(platform_id)
+    if not platform_inst:
+        return platform_id
+
     try:
-        platform_instances = plugin.context.get_platforms()
-        for inst in platform_instances:
-            if inst.platform_name == platform_id:
-                return inst.__class__.__name__
-        return platform_id
-    except Exception as e:
-        logger.error(f"获取平台适配器名称失败: {e}")
-        return platform_id
+        if hasattr(platform_inst, 'meta'):
+            meta = platform_inst.meta()
+            if hasattr(meta, 'name') and meta.name:
+                return str(meta.name)
+    except Exception:
+        pass
+
+    return platform_id
 
 
 def get_platform_api_client(plugin, platform_id: str):
     """获取平台 API 客户端"""
     try:
-        return plugin.context.get_platform_instance(platform_id)
+        platform_inst = plugin.context.get_platform_inst(platform_id)
+        if not platform_inst:
+            return None
+
+        if hasattr(platform_inst, 'bot') and hasattr(platform_inst.bot, 'api'):
+            return platform_inst.bot.api
+        if hasattr(platform_inst, 'client') and hasattr(platform_inst.client, 'api'):
+            return platform_inst.client.api
+        if hasattr(platform_inst, 'get_client'):
+            client = platform_inst.get_client()
+            if hasattr(client, 'api'):
+                return client.api
+        return None
     except Exception as e:
         logger.error(f"获取平台 API 客户端失败: {e}")
         return None
@@ -678,24 +702,19 @@ def get_platform_api_client(plugin, platform_id: str):
 def check_recall_capability(plugin, unified_msg_origin: str) -> tuple[bool, str]:
     """检查平台是否支持撤回"""
     try:
-        platform_api = get_platform_api_client(plugin, unified_msg_origin)
+        if not unified_msg_origin or ':' not in unified_msg_origin:
+            return False, "无法识别目标会话的平台信息"
 
-        if not platform_api:
-            return False, "无法获取平台API"
+        platform_id = unified_msg_origin.split(':', 1)[0]
+        adapter_name = get_platform_adapter_name(plugin, platform_id)
+        if adapter_name != 'aiocqhttp':
+            return False, f"平台 {platform_id}({adapter_name}) 暂不支持自动撤回"
 
-        adapter_name = get_platform_adapter_name(plugin, unified_msg_origin)
+        api = get_platform_api_client(plugin, platform_id)
+        if not api:
+            return False, f"平台 {platform_id} 缺少可用 API，无法自动撤回"
 
-        # 检查是否支持撤回
-        if not hasattr(platform_api, 'delete_msg'):
-            return False, "平台不支持撤回操作"
-
-        # 特殊平台检查
-        if adapter_name == 'TelegramAdapter':
-            return True, ""
-        elif adapter_name == 'OneBot11Adapter':
-            return True, ""
-        else:
-            return False, f"平台 {adapter_name} 可能不支持"
+        return True, ""
 
     except Exception as e:
         logger.error(f"检查撤回能力失败: {e}")
@@ -703,64 +722,98 @@ def check_recall_capability(plugin, unified_msg_origin: str) -> tuple[bool, str]
 
 
 async def send_aiocqhttp_with_message_id(plugin, item: Dict, unified_msg_origin: str) -> Optional[int | str]:
-    """使用 aiocqhttp 发送消息并返回 message_id"""
-    try:
-        platform_api = get_platform_api_client(plugin, unified_msg_origin)
-
-        if not platform_api or not hasattr(platform_api, 'send_message'):
-            logger.error(f"平台 {unified_msg_origin} 不支持发送消息")
-            return None
-
-        # 构建消息链
-        message_structure = item.get('message_structure', [])
-        message_chain = build_message_chain_from_structure(
-            message_structure,
-            plugin.data_dir,
-            logger
-        )
-
-        if not message_chain:
-            logger.warning(f"消息链构建失败")
-            return None
-
-        # 发送消息
-        result = await platform_api.send_message(
-            unified_msg_origin,
-            message_chain
-        )
-
-        # 提取 message_id
-        if result:
-            message_id = extract_message_id(result)
-            if message_id:
-                logger.info(f"消息已发送，message_id: {message_id}")
-                return message_id
-
-        logger.warning(f"无法从发送结果中提取 message_id")
+    """通过 OneBot v11 直接发送消息，确保拿到 message_id。"""
+    if not unified_msg_origin or ':' not in unified_msg_origin:
         return None
 
-    except Exception as e:
-        logger.error(f"发送消息失败: {e}", exc_info=True)
+    parts = unified_msg_origin.split(':', 2)
+    if len(parts) < 3:
         return None
+
+    platform_id, msg_type, target_id = parts[0], parts[1], parts[2]
+    if get_platform_adapter_name(plugin, platform_id) != 'aiocqhttp':
+        return None
+
+    api = get_platform_api_client(plugin, platform_id)
+    if not api:
+        return None
+
+    segments = []
+    for msg_item in item.get('message_structure', []):
+        mtype = msg_item.get('type')
+        if mtype == 'text':
+            segments.append({'type': 'text', 'data': {'text': msg_item.get('content', '')}})
+        elif mtype == 'at':
+            segments.append({'type': 'at', 'data': {'qq': str(msg_item.get('qq', ''))}})
+        elif mtype == 'atall':
+            segments.append({'type': 'at', 'data': {'qq': 'all'}})
+        elif mtype == 'face':
+            segments.append({'type': 'face', 'data': {'id': msg_item.get('id')}})
+        elif mtype == 'image':
+            full_path = os.path.join(plugin.data_dir, msg_item.get('path', ''))
+            if os.path.exists(full_path):
+                try:
+                    from pathlib import Path
+                    file_uri = Path(full_path).resolve().as_uri()
+                except Exception:
+                    file_uri = full_path
+                segments.append({'type': 'image', 'data': {'file': file_uri}})
+        elif mtype == 'record':
+            full_path = os.path.join(plugin.data_dir, msg_item.get('path', ''))
+            if os.path.exists(full_path):
+                try:
+                    from pathlib import Path
+                    file_uri = Path(full_path).resolve().as_uri()
+                except Exception:
+                    file_uri = full_path
+                segments.append({'type': 'record', 'data': {'file': file_uri}})
+        elif mtype == 'video':
+            full_path = os.path.join(plugin.data_dir, msg_item.get('path', ''))
+            if os.path.exists(full_path):
+                try:
+                    from pathlib import Path
+                    file_uri = Path(full_path).resolve().as_uri()
+                except Exception:
+                    file_uri = full_path
+                segments.append({'type': 'video', 'data': {'file': file_uri}})
+
+    if not segments:
+        return None
+
+    if msg_type == 'GroupMessage':
+        ret = await api.call_action('send_group_msg', group_id=int(target_id), message=segments)
+    elif msg_type == 'FriendMessage':
+        ret = await api.call_action('send_private_msg', user_id=int(target_id), message=segments)
+    else:
+        return None
+
+    return extract_message_id(ret)
 
 
 async def recall_message_later(plugin, unified_msg_origin: str, message_id: int | str, delay_seconds: int):
-    """延迟撤回消息"""
+    """延时撤回消息，目前仅在 aiocqhttp(OneBot v11) 平台启用。"""
+    if delay_seconds <= 0:
+        return
+
     try:
         import asyncio
         await asyncio.sleep(delay_seconds)
 
-        platform_api = get_platform_api_client(plugin, unified_msg_origin)
-
-        if not platform_api or not hasattr(platform_api, 'delete_msg'):
-            logger.error(f"平台 {unified_msg_origin} 不支持撤回操作")
+        platform_id = unified_msg_origin.split(':', 1)[0] if ':' in unified_msg_origin else ""
+        adapter_name = get_platform_adapter_name(plugin, platform_id)
+        if adapter_name != 'aiocqhttp':
+            logger.info(f"平台 {platform_id}({adapter_name}) 暂不支持自动撤回，跳过 message_id={message_id}")
             return
 
-        await platform_api.delete_msg(message_id)
-        logger.info(f"已撤回消息 {message_id}")
+        api = get_platform_api_client(plugin, platform_id)
+        if not api:
+            logger.warning(f"平台实例缺少可用 API，无法撤回消息: {platform_id}")
+            return
 
+        ret = await api.call_action('delete_msg', message_id=message_id)
+        logger.info(f"已撤回消息 message_id={message_id}, ret={ret}")
     except Exception as e:
-        logger.error(f"撤回消息失败: {e}", exc_info=True)
+        logger.error(f"自动撤回消息失败 message_id={message_id}: {e}", exc_info=True)
 
 
 async def save_media_component(plugin, msg_comp: Image | Record | Video, prefix: str) -> Optional[Dict[str, str]]:
@@ -828,15 +881,19 @@ async def send_reminder(plugin, item: Dict, session: str):
             return
 
         # 构建消息链
-        message_chain = build_message_chain_from_structure(
+        chain = build_message_chain_from_structure(
             message_structure,
             plugin.data_dir,
             logger
         )
 
-        if not message_chain:
+        if not chain:
             logger.warning(f"提醒 '{item.get('name')}' 消息链构建失败")
             return
+
+        # 包装成 MessageChain 对象
+        message_chain = MessageChain()
+        message_chain.chain = chain
 
         # 发送消息
         await plugin.context.send_message(session, message_chain)
