@@ -1,7 +1,11 @@
 import os
 import re
+import aiohttp
 from collections.abc import Awaitable, Callable
 from typing import Any, Dict, List, Optional
+from apscheduler.triggers.cron import CronTrigger
+from astrbot.api import logger
+from astrbot.api.message_components import Image, Record, Video
 
 
 def translate_to_apscheduler_cron(cron_expr: str) -> str:
@@ -478,3 +482,439 @@ def build_message_chain_from_structure(
         if component is not None:
             chain.append(component)
     return chain
+
+
+def load_reminders(plugin):
+    """从文件加载提醒数据"""
+    try:
+        if os.path.exists(plugin.data_file):
+            with open(plugin.data_file, 'r', encoding='utf-8') as f:
+                import json
+                data = json.load(f)
+                plugin.reminders = data.get('reminders', [])
+                plugin.linked_tasks = data.get('linked_tasks', {})
+            logger.info(f"已加载 {len(plugin.reminders)} 个任务/提醒")
+        else:
+            plugin.reminders = []
+            plugin.linked_tasks = {}
+    except Exception as e:
+        logger.error(f"加载数据失败: {e}", exc_info=True)
+        plugin.reminders = []
+        plugin.linked_tasks = {}
+
+
+def save_reminders(plugin):
+    """保存提醒数据到文件"""
+    try:
+        import json
+        data = {
+            'reminders': plugin.reminders,
+            'linked_tasks': plugin.linked_tasks
+        }
+
+        with open(plugin.data_file, 'w', encoding='utf-8') as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+
+        logger.debug("数据已保存")
+    except Exception as e:
+        logger.error(f"保存数据失败: {e}", exc_info=True)
+
+
+def restore_reminders(plugin):
+    """恢复提醒任务"""
+    try:
+        if not plugin.reminders:
+            return
+
+        count = 0
+        for item in plugin.reminders:
+            try:
+                # 兼容旧数据结构
+                if 'cron_expr' not in item and 'cron' in item:
+                    item['cron_expr'] = item['cron']
+                if 'sessions' in item and 'enabled_sessions' not in item:
+                    item['enabled_sessions'] = item['sessions']
+
+                # 恢复调度
+                import asyncio
+                asyncio.create_task(schedule_reminder(plugin, item))
+                count += 1
+            except Exception as e:
+                logger.error(f"恢复任务 {item.get('name')} 失败: {e}")
+
+        logger.info(f"已恢复 {count} 个任务/提醒")
+    except Exception as e:
+        logger.error(f"恢复数据失败: {e}", exc_info=True)
+
+
+def add_job(plugin, item: Dict, session: str):
+    """添加任务到调度器"""
+    try:
+        job_id = build_job_id(item.get('name', ''), session)
+        cron_expr = item.get('cron_expr', item.get('cron', ''))
+        aps_cron = translate_to_apscheduler_cron(cron_expr)
+        trigger = CronTrigger.from_crontab(aps_cron)
+
+        # 如果已存在相同ID的任务，先删除
+        try:
+            plugin.scheduler.remove_job(job_id)
+        except Exception:
+            pass  # 任务不存在，正常情况
+
+        plugin.scheduler.add_job(
+            trigger_reminder,
+            trigger=trigger,
+            id=job_id,
+            args=[plugin, item, session]
+        )
+
+        # 保存任务映射
+        if not hasattr(plugin, 'job_mapping'):
+            plugin.job_mapping = {}
+        plugin.job_mapping[job_id] = (item, session)
+
+        logger.info(f"已添加调度任务: {job_id}, 会话: {session}")
+    except Exception as e:
+        logger.error(f"添加调度任务失败: {e}", exc_info=True)
+        raise
+
+
+def remove_job(plugin, item: Dict, session: str):
+    """从调度器移除任务"""
+    try:
+        job_id = build_job_id(item.get('name', ''), session)
+
+        # 修复：直接尝试删除任务，如果不存在会抛出异常
+        try:
+            plugin.scheduler.remove_job(job_id)
+            logger.info(f"已移除调度任务: {job_id}, 会话: {session}")
+        except Exception:
+            # 任务不存在时的正常情况，静默处理
+            pass
+
+        # 清理任务映射
+        if hasattr(plugin, 'job_mapping') and job_id in plugin.job_mapping:
+            del plugin.job_mapping[job_id]
+    except Exception as e:
+        logger.error(f"移除调度任务失败: {e}", exc_info=True)
+
+
+def remove_all_jobs_for_item(plugin, item: Dict):
+    """移除某个任务在所有会话中的调度"""
+    try:
+        # 尝试移除可能存在的多个任务实例
+        if hasattr(plugin, 'job_mapping'):
+            jobs_to_remove = [
+                jid for jid, (itm, _) in list(plugin.job_mapping.items())
+                if itm.get('name') == item.get('name') and
+                   itm.get('is_task', False) == item.get('is_task', False)
+            ]
+
+            for jid in jobs_to_remove:
+                if jid in plugin.scheduler.get_jobs():
+                    plugin.scheduler.remove_job(jid)
+                if jid in plugin.job_mapping:
+                    del plugin.job_mapping[jid]
+
+            logger.info(f"已移除任务的所有调度: {item.get('name')}")
+    except Exception as e:
+        logger.error(f"移除任务调度失败: {e}", exc_info=True)
+
+
+async def schedule_reminder(plugin, item: Dict):
+    """调度提醒或任务"""
+    try:
+        sessions = item.get('enabled_sessions', [])
+        if not sessions:
+            logger.warning(f"任务/提醒 '{item.get('name')}' 没有启用的会话，跳过调度")
+            return
+
+        for session in sessions:
+            add_job(plugin, item, session)
+
+        logger.info(f"已调度任务/提醒 '{item.get('name')}' 到 {len(sessions)} 个会话")
+    except Exception as e:
+        logger.error(f"调度任务/提醒失败: {e}", exc_info=True)
+        raise
+
+
+async def reschedule_reminder(plugin, item: Dict):
+    """重新调度提醒或任务"""
+    try:
+        # 移除旧调度
+        remove_all_jobs_for_item(plugin, item)
+
+        # 添加新调度
+        await schedule_reminder(plugin, item)
+
+        logger.info(f"已重新调度任务/提醒 '{item.get('name')}'")
+    except Exception as e:
+        logger.error(f"重新调度任务/提醒失败: {e}", exc_info=True)
+        raise
+
+
+def get_platform_adapter_name(plugin, platform_id: str) -> str:
+    """获取平台适配器名称"""
+    try:
+        platform_instances = plugin.context.get_platforms()
+        for inst in platform_instances:
+            if inst.platform_name == platform_id:
+                return inst.__class__.__name__
+        return platform_id
+    except Exception as e:
+        logger.error(f"获取平台适配器名称失败: {e}")
+        return platform_id
+
+
+def get_platform_api_client(plugin, platform_id: str):
+    """获取平台 API 客户端"""
+    try:
+        return plugin.context.get_platform_instance(platform_id)
+    except Exception as e:
+        logger.error(f"获取平台 API 客户端失败: {e}")
+        return None
+
+
+def check_recall_capability(plugin, unified_msg_origin: str) -> tuple[bool, str]:
+    """检查平台是否支持撤回"""
+    try:
+        platform_api = get_platform_api_client(plugin, unified_msg_origin)
+
+        if not platform_api:
+            return False, "无法获取平台API"
+
+        adapter_name = get_platform_adapter_name(plugin, unified_msg_origin)
+
+        # 检查是否支持撤回
+        if not hasattr(platform_api, 'delete_msg'):
+            return False, "平台不支持撤回操作"
+
+        # 特殊平台检查
+        if adapter_name == 'TelegramAdapter':
+            return True, ""
+        elif adapter_name == 'OneBot11Adapter':
+            return True, ""
+        else:
+            return False, f"平台 {adapter_name} 可能不支持"
+
+    except Exception as e:
+        logger.error(f"检查撤回能力失败: {e}")
+        return False, f"检查失败: {e}"
+
+
+async def send_aiocqhttp_with_message_id(plugin, item: Dict, unified_msg_origin: str) -> Optional[int | str]:
+    """使用 aiocqhttp 发送消息并返回 message_id"""
+    try:
+        platform_api = get_platform_api_client(plugin, unified_msg_origin)
+
+        if not platform_api or not hasattr(platform_api, 'send_message'):
+            logger.error(f"平台 {unified_msg_origin} 不支持发送消息")
+            return None
+
+        # 构建消息链
+        message_structure = item.get('message_structure', [])
+        message_chain = build_message_chain_from_structure(
+            message_structure,
+            plugin.data_dir,
+            logger
+        )
+
+        if not message_chain:
+            logger.warning(f"消息链构建失败")
+            return None
+
+        # 发送消息
+        result = await platform_api.send_message(
+            unified_msg_origin,
+            message_chain
+        )
+
+        # 提取 message_id
+        if result:
+            message_id = extract_message_id(result)
+            if message_id:
+                logger.info(f"消息已发送，message_id: {message_id}")
+                return message_id
+
+        logger.warning(f"无法从发送结果中提取 message_id")
+        return None
+
+    except Exception as e:
+        logger.error(f"发送消息失败: {e}", exc_info=True)
+        return None
+
+
+async def recall_message_later(plugin, unified_msg_origin: str, message_id: int | str, delay_seconds: int):
+    """延迟撤回消息"""
+    try:
+        import asyncio
+        await asyncio.sleep(delay_seconds)
+
+        platform_api = get_platform_api_client(plugin, unified_msg_origin)
+
+        if not platform_api or not hasattr(platform_api, 'delete_msg'):
+            logger.error(f"平台 {unified_msg_origin} 不支持撤回操作")
+            return
+
+        await platform_api.delete_msg(message_id)
+        logger.info(f"已撤回消息 {message_id}")
+
+    except Exception as e:
+        logger.error(f"撤回消息失败: {e}", exc_info=True)
+
+
+async def save_media_component(plugin, msg_comp: Image | Record | Video, prefix: str) -> Optional[Dict[str, str]]:
+    """保存媒体组件到本地"""
+    try:
+        # 获取媒体URL
+        url = None
+        if isinstance(msg_comp, Image):
+            url = msg_comp.url
+        elif isinstance(msg_comp, Record):
+            url = msg_comp.url
+        elif isinstance(msg_comp, Video):
+            url = msg_comp.url
+
+        if not url:
+            return None
+
+        # 生成文件名
+        import time
+        import hashlib
+        timestamp = time.strftime('%Y%m%d_%H%M%S')
+        ext = {
+            'image': '.jpg',
+            'record': '.wav',
+            'video': '.mp4'
+        }.get(prefix, '.bin')
+
+        filename = f"{prefix}_{timestamp}_{hashlib.md5(url.encode()).hexdigest()[:8]}{ext}"
+        filepath = os.path.join(plugin.data_dir, filename)
+
+        # 下载文件
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url) as resp:
+                if resp.status == 200:
+                    with open(filepath, 'wb') as f:
+                        f.write(await resp.read())
+
+        return {'type': prefix, 'path': filename, 'url': url}
+
+    except Exception as e:
+        logger.error(f"保存媒体组件失败: {e}", exc_info=True)
+        return None
+
+
+async def trigger_reminder(plugin, item: Dict, session: str):
+    """触发提醒或任务"""
+    try:
+        if item.get('is_task', False):
+            # 执行任务
+            await execute_task(plugin, item, session)
+        else:
+            # 发送提醒
+            await send_reminder(plugin, item, session)
+
+    except Exception as e:
+        logger.error(f"触发任务/提醒失败: {e}", exc_info=True)
+
+
+async def send_reminder(plugin, item: Dict, session: str):
+    """发送定时提醒"""
+    try:
+        message_structure = item.get('message_structure', [])
+        if not message_structure:
+            logger.warning(f"提醒 '{item.get('name')}' 没有内容，跳过发送")
+            return
+
+        # 构建消息链
+        message_chain = build_message_chain_from_structure(
+            message_structure,
+            plugin.data_dir,
+            logger
+        )
+
+        if not message_chain:
+            logger.warning(f"提醒 '{item.get('name')}' 消息链构建失败")
+            return
+
+        # 发送消息
+        await plugin.context.send_message(session, message_chain)
+        logger.info(f"提醒 '{item.get('name')}' 已发送到 {session}")
+
+        # 处理撤回
+        recall_after_seconds = item.get('recall_after_seconds', 0)
+        if recall_after_seconds > 0:
+            await handle_recall(plugin, item, session, recall_after_seconds)
+
+    except Exception as e:
+        logger.error(f"发送提醒 '{item.get('name')}' 时出错: {e}", exc_info=True)
+
+
+async def handle_recall(plugin, item: Dict, session: str, delay_seconds: int):
+    """处理消息撤回"""
+    try:
+        # 检查平台是否支持撤回
+        recall_ok, reason = check_recall_capability(plugin, session)
+        if not recall_ok:
+            if session not in plugin._recall_notice_sent:
+                plugin._recall_notice_sent.add(session)
+                logger.info(f"会话 {session} 不支持自动撤回: {reason}")
+            return
+
+        # 发送消息并获取消息ID
+        message_id = await send_aiocqhttp_with_message_id(plugin, item, session)
+        if message_id:
+            # 延迟撤回
+            await recall_message_later(plugin, session, message_id, delay_seconds)
+
+    except Exception as e:
+        logger.error(f"处理撤回时出错: {e}", exc_info=True)
+
+
+async def execute_task(plugin, item: Dict, session: str):
+    """执行定时任务"""
+    try:
+        from .event_factory import EventFactory
+        from astrbot.api.message_components import At
+
+        command = item.get('command', '')
+        if not command:
+            logger.warning(f"任务 '{item.get('name')}' 没有指令，跳过执行")
+            return
+
+        original_components = item.get('message_structure', [])
+        is_admin = item.get('is_admin', True)
+        self_id = item.get('self_id')
+
+        # 转换消息结构为组件
+        component_list = []
+        for comp_data in original_components:
+            if comp_data.get('type') == 'at':
+                component_list.append(At(qq=comp_data.get('qq')))
+
+        logger.info(f"任务 '{item.get('name')}' 执行: {command}")
+
+        # 创建事件并派发
+        event_factory = EventFactory(plugin.context)
+        event = event_factory.create_event(
+            session,
+            command,
+            item.get('created_by', 'timer'),
+            item.get('creator_name', 'Timer'),
+            original_components=component_list,
+            is_admin=is_admin,
+            self_id=self_id
+        )
+
+        try:
+            event.set_extra("reminder_timer_origin", True)
+        except Exception:
+            pass
+
+        # 派发事件
+        plugin.context.get_event_queue().put_nowait(event)
+        logger.info(f"任务 '{item.get('name')}' 已派发: {command}")
+
+    except Exception as e:
+        logger.error(f"执行任务失败: {item.get('name', 'unknown')}, {e}", exc_info=True)
