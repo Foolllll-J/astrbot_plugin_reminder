@@ -3,12 +3,12 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import time
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-import aiohttp
 from apscheduler.triggers.cron import CronTrigger
 from astrbot.api import logger
 from astrbot.api.event import MessageChain
@@ -209,6 +209,121 @@ async def extract_inline_message_structure(
     return message_structure
 
 
+async def extract_message_structure_after_prefix(
+    message_chain: List[Any],
+    prefix_text: str,
+    save_media: Callable[[Any], Awaitable[Optional[Dict[str, Any]]]],
+) -> List[Dict[str, Any]]:
+    """从消息链中提取前缀之后的消息结构，保留组件顺序。"""
+    message_structure: List[Dict[str, Any]] = []
+    remaining_prefix = prefix_text or ""
+
+    for msg_comp in message_chain:
+        if isinstance(msg_comp, Plain):
+            text = msg_comp.text or ""
+            if remaining_prefix:
+                if text.startswith(remaining_prefix):
+                    text = text[len(remaining_prefix):]
+                    remaining_prefix = ""
+                else:
+                    max_len = min(len(text), len(remaining_prefix))
+                    i = 0
+                    while i < max_len and text[i] == remaining_prefix[i]:
+                        i += 1
+                    if i > 0:
+                        text = text[i:]
+                        remaining_prefix = remaining_prefix[i:]
+                        if remaining_prefix and text:
+                            remaining_prefix = ""
+                    else:
+                        # 无法匹配前缀时，避免误删内容，直接停止前缀剥离
+                        remaining_prefix = ""
+
+            if not text:
+                continue
+            message_structure.append({"type": "text", "content": text})
+            continue
+
+        if isinstance(msg_comp, At):
+            qq = str(msg_comp.qq)
+            if qq.lower() == "all":
+                message_structure.append({"type": "atall"})
+            else:
+                message_structure.append({"type": "at", "qq": qq})
+            continue
+
+        if isinstance(msg_comp, Face):
+            message_structure.append({"type": "face", "id": msg_comp.id})
+            continue
+
+        media_item = await save_media(msg_comp)
+        if media_item:
+            message_structure.append(media_item)
+
+    return message_structure
+
+
+async def extract_message_structure_after_token_count(
+    message_chain: List[Any],
+    token_count: int,
+    save_media: Callable[[Any], Awaitable[Optional[Dict[str, Any]]]],
+) -> List[Dict[str, Any]]:
+    """从消息链中移除前 N 个文本 token 后提取结构，保留组件顺序。"""
+    message_structure: List[Dict[str, Any]] = []
+    tokens_left = max(0, int(token_count or 0))
+
+    def _strip_leading_tokens(text: str, count: int) -> tuple[str, int]:
+        i = 0
+        n = len(text)
+        removed = 0
+        while i < n and removed < count:
+            # skip whitespace
+            while i < n and text[i].isspace():
+                i += 1
+            if i >= n:
+                break
+            # consume token
+            while i < n and not text[i].isspace():
+                i += 1
+            removed += 1
+        if removed >= count:
+            while i < n and text[i].isspace():
+                i += 1
+            return text[i:], 0
+        return "", count - removed
+
+    for msg_comp in message_chain:
+        if isinstance(msg_comp, Plain):
+            text = msg_comp.text or ""
+            if tokens_left > 0:
+                text, tokens_left = _strip_leading_tokens(text, tokens_left)
+            if not text:
+                continue
+            message_structure.append({"type": "text", "content": text})
+            continue
+
+        if tokens_left > 0:
+            continue
+
+        if isinstance(msg_comp, At):
+            qq = str(msg_comp.qq)
+            if qq.lower() == "all":
+                message_structure.append({"type": "atall"})
+            else:
+                message_structure.append({"type": "at", "qq": qq})
+            continue
+
+        if isinstance(msg_comp, Face):
+            message_structure.append({"type": "face", "id": msg_comp.id})
+            continue
+
+        media_item = await save_media(msg_comp)
+        if media_item:
+            message_structure.append(media_item)
+
+    return message_structure
+
+
 def summarize_message_structure(message_structure: List[Dict[str, Any]]) -> Dict[str, int]:
     """统计各类消息组件数量。"""
     summary = {
@@ -250,10 +365,13 @@ def extract_message_id(send_result: Any) -> Optional[int | str]:
     return None
 
 
-def build_job_id(item_id: str, session: str) -> str:
+def build_job_id(item_id: str, session: str, is_task: bool | None = None) -> str:
     """根据任务 ID 和会话构建稳定的调度任务 ID。"""
     safe_session = session.replace(":", "_")
-    return f"{item_id}::{safe_session}"
+    if is_task is None:
+        return f"{item_id}::{safe_session}"
+    prefix = "task" if is_task else "reminder"
+    return f"{prefix}::{item_id}::{safe_session}"
 
 
 def resolve_session_origin(current_origin: str, is_group_message: bool, session_param: str | None) -> str | None:
@@ -278,6 +396,33 @@ def resolve_session_origin(current_origin: str, is_group_message: bool, session_
             return f"{parts[0]}:GroupMessage:{parts[1]}"
 
     return current_origin
+
+
+def normalize_session_param_token(token: str | None) -> str | None:
+    """仅当 @/# 后为纯数字时视作会话参数。"""
+    if not token or token[0] not in ("@", "#"):
+        return None
+
+    raw = token[1:]
+    if raw.isdigit():
+        return f"{token[0]}{raw}"
+
+    return None
+
+
+def is_user_allowed(plugin, event) -> bool:
+    """统一权限检查：管理员放行；白名单为空则放行。"""
+    try:
+        if event.is_admin():
+            return True
+        whitelist = getattr(plugin, "whitelist", None)
+        if whitelist is None:
+            whitelist = plugin.config.get("whitelist", [])
+        if not whitelist:
+            return True
+        return event.get_sender_id() in whitelist
+    except Exception:
+        return True
 
 
 def describe_origin(unified_msg_origin: str) -> str:
@@ -486,15 +631,135 @@ def build_message_chain_from_structure(
 def load_reminders(plugin):
     """从文件加载提醒数据"""
     try:
-        if os.path.exists(plugin.data_file):
-            with open(plugin.data_file, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-                plugin.reminders = data.get('reminders', [])
-                plugin.linked_tasks = data.get('linked_tasks', {})
-            logger.info(f"已加载 {len(plugin.reminders)} 个任务/提醒")
+        plugin.reminders = []
+        plugin.linked_tasks = {}
+
+        if not os.path.exists(plugin.data_file):
+            return
+
+        with open(plugin.data_file, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+
+        if isinstance(data, list):
+            raw_reminders = data
+            raw_linked_tasks = {}
         else:
-            plugin.reminders = []
-            plugin.linked_tasks = {}
+            raw_reminders = data.get('reminders', [])
+            raw_linked_tasks = data.get('linked_tasks', {})
+
+        normalized_linked_tasks: Dict[str, List[Dict]] = {}
+        for reminder_name, task_data in raw_linked_tasks.items():
+            commands_list = []
+            if isinstance(task_data, str):
+                commands_list.append({'command': task_data, 'message_structure': []})
+            elif isinstance(task_data, list):
+                for cmd in task_data:
+                    if isinstance(cmd, str):
+                        commands_list.append({'command': cmd, 'message_structure': []})
+                    elif isinstance(cmd, dict):
+                        commands_list.append(cmd)
+            normalized_linked_tasks[reminder_name] = commands_list
+
+        name_map: Dict[str, str] = {}
+        existing_names = set()
+        need_resave = False
+
+        for item in raw_reminders:
+            orig_name = str(item.get('name', '')).strip()
+            if not orig_name:
+                continue
+
+            if re.fullmatch(r"\d+", orig_name):
+                prefix = "任务" if item.get('is_task', False) else "提醒"
+                base_name = f"{prefix}{orig_name}"
+                new_name = base_name
+                suffix = 1
+                while new_name in existing_names:
+                    new_name = f"{base_name}_{suffix}"
+                    suffix += 1
+                item['name'] = new_name
+                existing_names.add(new_name)
+                if not item.get('is_task', False):
+                    name_map[orig_name] = new_name
+                need_resave = True
+            else:
+                if orig_name in existing_names:
+                    base_name = orig_name
+                    new_name = base_name
+                    suffix = 1
+                    while new_name in existing_names:
+                        new_name = f"{base_name}_{suffix}"
+                        suffix += 1
+                    item['name'] = new_name
+                    if not item.get('is_task', False):
+                        name_map[orig_name] = new_name
+                    existing_names.add(new_name)
+                    need_resave = True
+                else:
+                    existing_names.add(orig_name)
+
+            if 'enabled_sessions' not in item:
+                unified = item.get('unified_msg_origin')
+                if unified:
+                    item['enabled_sessions'] = [unified]
+                else:
+                    item['enabled_sessions'] = []
+                need_resave = True
+
+            if 'unified_msg_origin' in item:
+                item.pop('unified_msg_origin', None)
+                need_resave = True
+
+            if isinstance(item.get('message_structure'), list):
+                normalized_message_structure = normalize_message_structure(item['message_structure'])
+                if normalized_message_structure != item['message_structure']:
+                    item['message_structure'] = normalized_message_structure
+                    need_resave = True
+
+                if item.get('is_task', False):
+                    normalized_command = collect_text_from_message_structure(item['message_structure']).strip()
+                    if normalized_command and normalized_command != item.get('command', ''):
+                        item['command'] = normalized_command
+                        need_resave = True
+
+            plugin.reminders.append(item)
+
+        migrated_linked_tasks: Dict[str, List[Dict]] = {}
+        for old_name, commands in normalized_linked_tasks.items():
+            new_name = name_map.get(old_name, old_name)
+            normalized_commands: List[Dict] = []
+            for cmd in commands:
+                if isinstance(cmd, str):
+                    normalized_commands.append({'command': cmd, 'message_structure': []})
+                    need_resave = True
+                    continue
+
+                if not isinstance(cmd, dict):
+                    need_resave = True
+                    continue
+
+                cmd_struct = cmd.get('message_structure')
+                if not isinstance(cmd_struct, list):
+                    cmd_struct = []
+                    cmd['message_structure'] = cmd_struct
+                    need_resave = True
+
+                normalized_cmd_struct = normalize_message_structure(cmd_struct)
+                if normalized_cmd_struct != cmd_struct:
+                    cmd['message_structure'] = normalized_cmd_struct
+                    need_resave = True
+
+                normalized_commands.append(cmd)
+
+            if new_name not in migrated_linked_tasks:
+                migrated_linked_tasks[new_name] = normalized_commands
+            else:
+                migrated_linked_tasks[new_name].extend(normalized_commands)
+
+        plugin.linked_tasks = migrated_linked_tasks
+
+        if name_map or need_resave:
+            save_reminders(plugin)
     except Exception as e:
         logger.error(f"加载数据失败: {e}", exc_info=True)
         plugin.reminders = []
@@ -533,7 +798,7 @@ async def restore_reminders(plugin):
                     item['enabled_sessions'] = item['sessions']
 
                 # 恢复调度
-                asyncio.create_task(schedule_reminder(plugin, item))
+                await schedule_reminder(plugin, item)
                 count += 1
             except Exception as e:
                 logger.error(f"恢复任务 {item.get('name')} 失败: {e}")
@@ -546,16 +811,18 @@ async def restore_reminders(plugin):
 def add_job(plugin, item: Dict, session: str):
     """添加任务到调度器"""
     try:
-        job_id = build_job_id(item.get('name', ''), session)
+        job_id = build_job_id(item.get('name', ''), session, is_task=item.get('is_task', False))
+        legacy_job_id = build_job_id(item.get('name', ''), session, is_task=None)
         cron_expr = item.get('cron_expr', item.get('cron', ''))
         aps_cron = translate_to_apscheduler_cron(cron_expr)
         trigger = CronTrigger.from_crontab(aps_cron)
 
         # 如果已存在相同ID的任务，先删除
-        try:
-            plugin.scheduler.remove_job(job_id)
-        except Exception:
-            pass  # 任务不存在，正常情况
+        for jid in {job_id, legacy_job_id}:
+            try:
+                plugin.scheduler.remove_job(jid)
+            except Exception:
+                pass  # 任务不存在，正常情况
 
         plugin.scheduler.add_job(
             trigger_reminder,
@@ -569,7 +836,6 @@ def add_job(plugin, item: Dict, session: str):
             plugin.job_mapping = {}
         plugin.job_mapping[job_id] = (item, session)
 
-        logger.info(f"已添加调度任务: {job_id}, 会话: {session}")
     except Exception as e:
         logger.error(f"添加调度任务失败: {e}", exc_info=True)
         raise
@@ -578,15 +844,21 @@ def add_job(plugin, item: Dict, session: str):
 def remove_job(plugin, item: Dict, session: str):
     """从调度器移除任务"""
     try:
-        job_id = build_job_id(item.get('name', ''), session)
+        job_id = build_job_id(item.get('name', ''), session, is_task=item.get('is_task', False))
+        legacy_job_id = build_job_id(item.get('name', ''), session, is_task=None)
 
         # 修复：直接尝试删除任务，如果不存在会抛出异常
-        try:
-            plugin.scheduler.remove_job(job_id)
-            logger.info(f"已移除调度任务: {job_id}, 会话: {session}")
-        except Exception:
-            # 任务不存在时的正常情况，静默处理
-            pass
+        removed = False
+        for jid in {job_id, legacy_job_id}:
+            try:
+                plugin.scheduler.remove_job(jid)
+                logger.info(f"已移除调度任务: {jid}, 会话: {session}")
+                removed = True
+            except Exception:
+                # 任务不存在时的正常情况，静默处理
+                pass
+        if not removed:
+            logger.debug(f"调度任务不存在，跳过移除: {job_id}, 会话: {session}")
 
         # 清理任务映射
         if hasattr(plugin, 'job_mapping') and job_id in plugin.job_mapping:
@@ -598,7 +870,7 @@ def remove_job(plugin, item: Dict, session: str):
 def remove_all_jobs_for_item(plugin, item: Dict):
     """移除某个任务在所有会话中的调度"""
     try:
-        # 尝试移除可能存在的多个任务实例
+        # 尝试移除可能存在的多个任务实例（基于映射）
         if hasattr(plugin, 'job_mapping'):
             jobs_to_remove = [
                 jid for jid, (itm, _) in list(plugin.job_mapping.items())
@@ -616,7 +888,20 @@ def remove_all_jobs_for_item(plugin, item: Dict):
                 if jid in plugin.job_mapping:
                     del plugin.job_mapping[jid]
 
-            logger.info(f"已移除任务的所有调度: {item.get('name')}")
+        # 补充清理（兼容历史/不同ID格式）
+        for session in item.get('enabled_sessions', []) or []:
+            for jid in {
+                build_job_id(item.get('name', ''), session, is_task=item.get('is_task', False)),
+                build_job_id(item.get('name', ''), session, is_task=None),
+            }:
+                try:
+                    plugin.scheduler.remove_job(jid)
+                except Exception:
+                    pass
+                if hasattr(plugin, 'job_mapping') and jid in plugin.job_mapping:
+                    del plugin.job_mapping[jid]
+
+        logger.info(f"已移除任务的所有调度: {item.get('name')}")
     except Exception as e:
         logger.error(f"移除任务调度失败: {e}", exc_info=True)
 
@@ -632,7 +917,6 @@ async def schedule_reminder(plugin, item: Dict):
         for session in sessions:
             add_job(plugin, item, session)
 
-        logger.info(f"已调度任务/提醒 '{item.get('name')}' 到 {len(sessions)} 个会话")
     except Exception as e:
         logger.error(f"调度任务/提醒失败: {e}", exc_info=True)
         raise
@@ -716,8 +1000,13 @@ def check_recall_capability(plugin, unified_msg_origin: str) -> tuple[bool, str]
         return False, f"检查失败: {e}"
 
 
-async def send_aiocqhttp_with_message_id(plugin, item: Dict, unified_msg_origin: str) -> Optional[int | str]:
+async def send_aiocqhttp_with_message_id(
+    plugin, item: Dict, unified_msg_origin: str | None = None
+) -> Optional[int | str]:
     """通过 OneBot v11 直接发送消息，确保拿到 message_id。"""
+    if not unified_msg_origin:
+        unified_msg_origin = item.get("unified_msg_origin") or item.get("session")
+
     if not unified_msg_origin or ':' not in unified_msg_origin:
         return None
 
@@ -810,37 +1099,18 @@ async def recall_message_later(plugin, unified_msg_origin: str, message_id: int 
 async def save_media_component(plugin, msg_comp: Image | Record | Video, prefix: str) -> Optional[Dict[str, str]]:
     """保存媒体组件到本地"""
     try:
-        # 获取媒体URL
-        url = None
-        if isinstance(msg_comp, Image):
-            url = msg_comp.url
-        elif isinstance(msg_comp, Record):
-            url = msg_comp.url
-        elif isinstance(msg_comp, Video):
-            url = msg_comp.url
-
-        if not url:
-            return None
-
-        # 生成文件名
-        timestamp = time.strftime('%Y%m%d_%H%M%S')
-        ext = {
+        source_path = await msg_comp.convert_to_file_path()
+        suffix = Path(source_path).suffix or {
             'image': '.jpg',
-            'record': '.wav',
-            'video': '.mp4'
+            'record': '.amr',
+            'video': '.mp4',
         }.get(prefix, '.bin')
 
-        filename = f"{prefix}_{timestamp}_{hashlib.md5(url.encode()).hexdigest()[:8]}{ext}"
+        filename = f"{prefix}_{time.strftime('%Y%m%d_%H%M%S')}_{hashlib.md5(source_path.encode()).hexdigest()[:8]}{suffix}"
         filepath = os.path.join(plugin.data_dir, filename)
+        shutil.copyfile(source_path, filepath)
 
-        # 下载文件
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url) as resp:
-                if resp.status == 200:
-                    with open(filepath, 'wb') as f:
-                        f.write(await resp.read())
-
-        return {'type': prefix, 'path': filename, 'url': url}
+        return {'type': prefix, 'path': filename}
 
     except Exception as e:
         logger.error(f"保存媒体组件失败: {e}", exc_info=True)
@@ -923,7 +1193,7 @@ async def send_reminder(plugin, item: Dict, session: str):
             if message_ids:
                 for message_id in message_ids:
                     asyncio.create_task(
-                        recall_message_later(session, message_id, recall_after_seconds))
+                        recall_message_later(plugin, session, message_id, recall_after_seconds))
             else:
                 logger.warning(f"提醒已发送但未拿到 message_id，无法自动撤回: {item.get('name')}")
 

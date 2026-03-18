@@ -6,7 +6,7 @@ import os
 import asyncio
 import re
 import datetime
-from typing import Dict, List, Optional, AsyncGenerator
+from typing import Dict, List, AsyncGenerator
 
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, MessageChain
@@ -15,13 +15,14 @@ from astrbot.core.platform.astrbot_message import MessageType
 from apscheduler.triggers.cron import CronTrigger
 
 from .utils import (
-    build_job_id,
     describe_origin,
     execute_linked_command,
     extract_inline_message_structure,
+    extract_message_structure_after_token_count,
     fetch_reply_message_structure,
     format_duration_cn,
     normalize_message_structure,
+    normalize_session_param_token,
     parse_recall_seconds,
     resolve_session_origin,
     split_message_structure,
@@ -29,6 +30,7 @@ from .utils import (
     translate_to_apscheduler_cron,
     build_message_chain_from_structure,
     extract_message_id,
+    is_user_allowed,
 )
 
 
@@ -41,6 +43,11 @@ class ReminderManager:
     async def add_reminder(self, event: AstrMessageEvent) -> AsyncGenerator[str, None]:
         """添加定时提醒"""
         try:
+            # 权限检查
+            if not self._is_allowed(event):
+                yield "❌ 抱歉，你没有权限使用该指令。"
+                return
+
             parts = event.message_str.strip().split(maxsplit=2)
             if len(parts) < 3:
                 yield "❌ 参数缺失！用法: /添加提醒 <提醒名称> <cron表达式> <消息内容> [图片]"
@@ -57,8 +64,10 @@ class ReminderManager:
             remaining_parts = remaining.split(maxsplit=1)
             session_param = None
             if len(remaining_parts) >= 2 and remaining_parts[0].startswith(('@', '#')):
-                session_param = remaining_parts[0]
-                remaining = remaining_parts[1]
+                normalized = normalize_session_param_token(remaining_parts[0])
+                if normalized:
+                    session_param = normalized
+                    remaining = remaining_parts[1]
 
             target_origin = resolve_session_origin(
                 event.unified_msg_origin,
@@ -104,7 +113,55 @@ class ReminderManager:
             }
 
             # 处理提醒内容
-            await self._process_reminder_content(event, item, content_text, cron_expr)
+            used_inline_content = False
+            used_reply_content = False
+
+            recall_after_seconds = None
+            recall_time_token = ""
+            recall_after_seconds, cleaned_content = parse_recall_seconds(content_text)
+            if recall_after_seconds is not None:
+                recall_time_token = content_text.lstrip().split(maxsplit=1)[0]
+                content_text = cleaned_content
+
+            inline_structure = await extract_inline_message_structure(
+                event.get_messages(),
+                cron_expr,
+                lambda comp: self.plugin._save_media_component(comp, getattr(comp, 'type', 'media').lower()),
+            )
+            inline_structure = normalize_message_structure(inline_structure, recall_time_token)
+            used_inline_content = bool(inline_structure)
+
+            reply_structure = await fetch_reply_message_structure(
+                event,
+                self.plugin._get_platform_adapter_name,
+                self.plugin._get_platform_api_client,
+                self.plugin._save_media_component,
+                logger,
+            )
+
+            message_structure = []
+            if inline_structure and reply_structure:
+                message_structure = inline_structure + reply_structure
+                used_reply_content = True
+            elif inline_structure:
+                message_structure = inline_structure
+            elif reply_structure:
+                message_structure = reply_structure
+                used_reply_content = True
+
+            if not message_structure and content_text.strip():
+                text_structure = [{'type': 'text', 'content': content_text.strip()}]
+                text_structure = normalize_message_structure(text_structure, recall_time_token)
+                message_structure = text_structure
+                used_inline_content = True
+
+            if not message_structure:
+                yield "提醒内容不能为空，请至少提供文字或图片"
+                return
+
+            item['message_structure'] = message_structure
+            if recall_after_seconds is not None:
+                item['recall_after_seconds'] = recall_after_seconds
 
             # 添加到列表
             self.plugin.reminders.append(item)
@@ -115,11 +172,42 @@ class ReminderManager:
             # 保存数据
             self.plugin._save_reminders()
 
-            recall_info = ""
-            if item.get('recall_after_seconds', 0) > 0:
-                recall_info = f"\n⏰ 撤回: {format_duration_cn(item['recall_after_seconds'])}"
+            summary = summarize_message_structure(item.get('message_structure', []))
+            text_count = summary['text']
+            image_count = summary['image']
+            face_count = summary['face']
+            at_count = summary['at'] + summary['atall']
+            record_count = summary['record']
+            video_count = summary['video']
 
-            yield f"✅ 提醒 '{name}' 添加成功！\n📅 Cron: {cron_expr}\n📍 目标: {describe_origin(target_origin)}{recall_info}"
+            result_msg = f"✅ 提醒 '{name}' 添加成功！\nCron: {cron_expr}\n目标: {describe_origin(target_origin)}"
+            if text_count > 0:
+                result_msg += f"\n文字: {text_count}段"
+            if image_count > 0:
+                result_msg += f"\n图片: {image_count}张"
+            if face_count > 0:
+                result_msg += f"\n表情: {face_count}个"
+            if at_count > 0:
+                result_msg += f"\nAt: {at_count}人"
+            if record_count > 0:
+                result_msg += f"\n语音: {record_count}条"
+            if video_count > 0:
+                result_msg += f"\n视频: {video_count}条"
+            if item.get('recall_after_seconds', 0) > 0:
+                result_msg += f"\n撤回: {format_duration_cn(item['recall_after_seconds'])}"
+            if used_inline_content and used_reply_content:
+                result_msg += "\n内容来源: 指令正文 + 引用消息"
+            elif used_reply_content:
+                result_msg += "\n内容来源: 引用消息"
+            elif used_inline_content:
+                result_msg += "\n内容来源: 指令正文"
+
+            if item.get('recall_after_seconds', 0) > 0:
+                recall_ok, recall_reason = self.plugin._check_recall_capability(target_origin)
+                if not recall_ok:
+                    result_msg += f"\n⚠️ 已设置撤回，但{recall_reason}，将仅发送不撤回。"
+
+            yield result_msg
 
         except Exception as e:
             logger.error(f"添加提醒失败: {e}", exc_info=True)
@@ -128,12 +216,19 @@ class ReminderManager:
     async def edit_reminder(self, event: AstrMessageEvent) -> AsyncGenerator[str, None]:
         """编辑定时提醒"""
         try:
+            # 权限检查
+            if not self._is_allowed(event):
+                yield "❌ 抱歉，你没有权限使用该指令。"
+                return
+
             parts = event.message_str.strip().split(maxsplit=2)
             if len(parts) < 2:
                 yield "❌ 参数缺失！用法: /编辑提醒 <提醒名称或序号> [@好友号|#群号] [cron表达式] [消息内容]\n提示: 所有参数都可选，可单独或组合编辑"
                 return
 
             identifier, remaining = parts[1], parts[2] if len(parts) > 2 else ""
+            tokens_all = self._extract_message_tokens(event)
+            session_params, remaining_tokens = self._split_edit_remaining_tokens(tokens_all)
 
             # 查找目标提醒（支持名称或序号）
             target_item = None
@@ -159,7 +254,7 @@ class ReminderManager:
                 return
 
             # 如果没有提供剩余参数，显示当前配置
-            if not remaining.strip():
+            if not remaining_tokens and not session_params:
                 current_cron = target_item.get('cron_expr', target_item.get('cron', '未设置'))
                 message_structure = target_item.get('message_structure', [])
                 current_content = "未设置"
@@ -183,17 +278,6 @@ class ReminderManager:
                 yield f"📋 当前提醒配置：\nCron: {current_cron}\n内容: {current_content}{sessions_info}"
                 return
 
-            # 检查是否包含会话参数
-            session_params = []
-            remaining_parts = remaining.strip().split()
-            filtered_remaining = []
-
-            for part in remaining_parts:
-                if part.startswith('@') or part.startswith('#'):
-                    session_params.append(part)
-                else:
-                    filtered_remaining.append(part)
-
             # 如果有会话参数，解析并更新会话
             session_changed = False
             if session_params:
@@ -212,11 +296,10 @@ class ReminderManager:
                     target_item['enabled_sessions'] = new_sessions
                     session_changed = True
 
-            # 重新组合剩余参数用于解析cron和内容
-            remaining = ' '.join(filtered_remaining)
-
             # 解析参数
-            cron_expr, content_text = self._parse_edit_params(remaining)
+            cron_expr, content_text = self._parse_edit_params_from_tokens(remaining_tokens)
+            if content_text is not None and not content_text.strip():
+                content_text = None
 
             # 如果都没有提供，显示帮助
             if not cron_expr and not content_text and not session_params:
@@ -228,12 +311,30 @@ class ReminderManager:
                 target_item['cron_expr'] = cron_expr
 
             # 更新内容（仅在 content_text 非空时处理）
+            recall_changed = False
+            content_changed = False
+            used_inline_content = False
+            used_reply_content = False
             if content_text is not None and content_text.strip():
-                await self._process_reminder_content(event, target_item, content_text, cron_expr or target_item.get('cron_expr', ''))
+                recall_only_seconds, cleaned_content = parse_recall_seconds(content_text)
+                if recall_only_seconds is not None and not cleaned_content.strip():
+                    target_item['recall_after_seconds'] = recall_only_seconds
+                    recall_changed = True
+                else:
+                    used_inline_content, used_reply_content = await self._process_reminder_content(
+                        event,
+                        target_item,
+                        content_text,
+                        cron_expr or target_item.get('cron_expr', ''),
+                    )
+                    content_changed = True
 
             # 如果有任何变更，记录编辑时间
-            if session_changed or cron_expr or (content_text is not None and content_text.strip()):
+            if session_changed or cron_expr or content_changed or recall_changed:
                 target_item['edited_at'] = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                target_item['created_by'] = event.get_sender_id()
+                target_item['creator_name'] = event.get_sender_name()
+                target_item['is_admin'] = event.is_admin()
 
             # 保存更新
             self.plugin._save_reminders()
@@ -242,17 +343,57 @@ class ReminderManager:
             if session_changed or cron_expr:
                 await self.plugin._reschedule_reminder(target_item)
 
-            updates = []
-            if session_changed:
-                new_sessions = target_item.get('enabled_sessions', [])
-                sessions_str = ", ".join([describe_origin(s) for s in new_sessions])
-                updates.append(f"✅ 会话已更新: {sessions_str}")
-            if cron_expr:
-                updates.append(f"✅ Cron表达式已更新: {cron_expr}")
-            if content_text is not None and content_text.strip():
-                updates.append(f"✅ 内容已更新")
+            current_cron = target_item.get('cron_expr', target_item.get('cron', ''))
+            summary = summarize_message_structure(target_item.get('message_structure', []))
+            text_count = summary['text']
+            image_count = summary['image']
+            face_count = summary['face']
+            at_count = summary['at'] + summary['atall']
+            record_count = summary['record']
+            video_count = summary['video']
+            sessions = list(target_item.get('enabled_sessions', []))
+            session_count = len(sessions)
 
-            yield f"🎉 提醒 '{target_item['name']}' 编辑成功！\n" + "\n".join(updates)
+            msg = (
+                f"✅ 提醒已编辑！\n"
+                f"名称: {target_item.get('name', '')}\n"
+                f"cron: {current_cron}"
+            )
+            if text_count > 0:
+                msg += f"\n文字: {text_count}段"
+            if image_count > 0:
+                msg += f"\n图片: {image_count}张"
+            if face_count > 0:
+                msg += f"\n表情: {face_count}个"
+            if at_count > 0:
+                msg += f"\nAt: {at_count}人"
+            if record_count > 0:
+                msg += f"\n语音: {record_count}条"
+            if video_count > 0:
+                msg += f"\n视频: {video_count}条"
+            if target_item.get('recall_after_seconds', 0) > 0:
+                msg += f"\n撤回: {format_duration_cn(target_item['recall_after_seconds'])}"
+            if used_inline_content and used_reply_content:
+                msg += "\n内容来源: 指令正文 + 引用消息"
+            elif used_reply_content:
+                msg += "\n内容来源: 引用消息"
+            elif used_inline_content:
+                msg += "\n内容来源: 指令正文"
+            msg += f"\n已影响会话数: {session_count}"
+
+            if target_item.get('recall_after_seconds', 0) > 0 and sessions:
+                unsupported_sessions = []
+                for s in sessions:
+                    recall_ok, _ = self.plugin._check_recall_capability(s)
+                    if not recall_ok:
+                        unsupported_sessions.append(describe_origin(s))
+                if unsupported_sessions:
+                    display_sessions = "、".join(unsupported_sessions[:3])
+                    if len(unsupported_sessions) > 3:
+                        display_sessions += f" 等{len(unsupported_sessions)}个会话"
+                    msg += f"\n⚠️ 以下会话不支持自动撤回: {display_sessions}（将仅发送不撤回）"
+
+            yield msg
 
         except Exception as e:
             logger.error(f"编辑提醒时出错: {e}", exc_info=True)
@@ -261,6 +402,11 @@ class ReminderManager:
     async def delete_reminder(self, event: AstrMessageEvent, key: str = None) -> AsyncGenerator[str, None]:
         """删除定时提醒"""
         try:
+            # 权限检查
+            if not self._is_allowed(event):
+                yield "❌ 抱歉，你没有权限使用该指令。"
+                return
+
             if not key:
                 yield "❌ 参数缺失！用法: /删除提醒 <提醒名称或序号>"
                 return
@@ -295,9 +441,7 @@ class ReminderManager:
 
             # 移除调度
             target_item = self.plugin.reminders[target_index]
-            job_id = build_job_id(target_item['name'], target_item.get('session', ''))
-            if job_id in self.plugin.scheduler.get_jobs():
-                self.plugin.scheduler.remove_job(job_id)
+            self.plugin._remove_all_jobs_for_item(target_item)
 
             # 删除关联的媒体文件
             for msg_item in target_item.get('message_structure', []):
@@ -395,14 +539,29 @@ class ReminderManager:
                 info_text += f"\n📝 提醒内容:\n"
 
                 # 构建完整的消息链
-                message_components = [Plain(info_text)]
-
-                # 添加内容预览到同一消息
                 chunks = split_message_structure(target_item['message_structure'])
-                for chunk in chunks:
-                    preview_chain = build_message_chain_from_structure(chunk, self.plugin.data_dir, logger)
-                    if preview_chain:
-                        message_components.extend(preview_chain)
+                has_standalone_media = any(
+                    any(item.get("type") in ("record", "video") for item in chunk)
+                    for chunk in chunks
+                )
+
+                if has_standalone_media:
+                    # 语音/视频需要单独发送，其它内容合并到一条消息中
+                    message_components = [Plain(info_text)]
+                    standalone_chunks = []
+                    for chunk in chunks:
+                        if any(item.get("type") in ("record", "video") for item in chunk):
+                            standalone_chunks.append(chunk)
+                            continue
+                        preview_chain = build_message_chain_from_structure(chunk, self.plugin.data_dir, logger)
+                        if preview_chain:
+                            message_components.extend(preview_chain)
+                else:
+                    message_components = [Plain(info_text)]
+                    for chunk in chunks:
+                        preview_chain = build_message_chain_from_structure(chunk, self.plugin.data_dir, logger)
+                        if preview_chain:
+                            message_components.extend(preview_chain)
 
                 # 添加链接任务信息
                 reminder_name = target_item['name']
@@ -414,14 +573,69 @@ class ReminderManager:
                         linked_info += f"  {i}. {cmd_str}\n"
                     message_components.append(Plain(linked_info))
 
-                # 一次性返回完整消息链
+                # 先发送合并后的文本/图片/表情内容
                 yield {"type": "message_chain", "data": message_components}
+
+                # 再单独发送语音/视频
+                if has_standalone_media:
+                    for chunk in standalone_chunks:
+                        preview_chain = build_message_chain_from_structure(chunk, self.plugin.data_dir, logger)
+                        if preview_chain:
+                            yield {"type": "message_chain", "data": preview_chain}
             else:
                 # 显示所有提醒列表（简略信息）
-                result = f"📋 当前提醒列表:\n\n"
+                result = "📋 当前提醒列表:\n\n"
                 for idx, item in enumerate(items, 1):
                     result += f"{idx}. {item['name']}\n"
 
+                    enabled_sessions = item.get('enabled_sessions', [])
+                    if enabled_sessions:
+                        result += f"   已启用会话数: {len(enabled_sessions)}\n"
+                    else:
+                        result += "   已启用会话数: 0\n"
+
+                    result += f"   cron: {item.get('cron_expr', item.get('cron', 'N/A'))}\n"
+
+                    summary = summarize_message_structure(item.get('message_structure', []))
+                    text_count = summary['text']
+                    image_count = summary['image']
+                    face_count = summary['face']
+                    at_count = summary['at']
+                    atall_count = summary['atall']
+                    record_count = summary['record']
+                    video_count = summary['video']
+
+                    content_parts = []
+                    if text_count > 0:
+                        content_parts.append(f"文字{text_count}段")
+                    if image_count > 0:
+                        content_parts.append(f"图片{image_count}张")
+                    if face_count > 0:
+                        content_parts.append(f"表情{face_count}个")
+                    if at_count > 0:
+                        content_parts.append(f"At{at_count}人")
+                    if atall_count > 0:
+                        content_parts.append(f"@全体{atall_count}次")
+                    if record_count > 0:
+                        content_parts.append(f"语音{record_count}条")
+                    if video_count > 0:
+                        content_parts.append(f"视频{video_count}条")
+
+                    if content_parts:
+                        result += f"   内容: {' + '.join(content_parts)}\n"
+
+                    recall_after = int(item.get('recall_after_seconds', 0) or 0)
+                    if recall_after > 0:
+                        result += f"   撤回: {format_duration_cn(recall_after)}\n"
+
+                    reminder_name = item['name']
+                    if reminder_name in self.plugin.linked_tasks and self.plugin.linked_tasks[reminder_name]:
+                        linked_count = len(self.plugin.linked_tasks[reminder_name])
+                        result += f"   🔗 链接任务: {linked_count}个\n"
+
+                    result += f"   创建时间: {item.get('created_at', 'N/A')}\n\n"
+
+                result += "💡 使用 /查看提醒 <序号或名称> 查看详细内容"
                 yield result
 
         except Exception as e:
@@ -431,9 +645,6 @@ class ReminderManager:
     async def toggle_reminder_session(self, event: AstrMessageEvent, enable: bool) -> AsyncGenerator[str, None]:
         """启动或停止提醒"""
         try:
-            from .utils import resolve_session_origin
-            from astrbot.core.platform.astrbot_message import MessageType
-
             # 权限检查
             if not self._is_allowed(event):
                 yield "❌ 抱歉，你没有权限使用该指令。"
@@ -450,12 +661,14 @@ class ReminderManager:
             session_params = parts[2:]
 
             if session_params:
-                invalid_params = [p for p in session_params if not p.startswith('@') and not p.startswith('#')]
+                invalid_params = [
+                    p for p in session_params if normalize_session_param_token(p) is None
+                ]
                 if invalid_params:
                     invalid_str = " ".join(invalid_params)
                     yield f"❌ 会话参数无效: {invalid_str}\n用法: /{action}提醒 <提醒名> [@好友号|#群号 ...]"
                     return
-                raw_targets = session_params
+                raw_targets = [normalize_session_param_token(p) for p in session_params if normalize_session_param_token(p)]
             else:
                 raw_targets = [None]
 
@@ -552,15 +765,7 @@ class ReminderManager:
 
     def _is_allowed(self, event: AstrMessageEvent) -> bool:
         """检查用户是否有权限使用该插件"""
-        try:
-            if event.is_admin():
-                return True
-            whitelist = self.plugin.config.get('whitelist', [])
-            if not whitelist:
-                return True
-            return event.get_sender_id() in whitelist
-        except Exception:
-            return True
+        return is_user_allowed(self.plugin, event)
 
     async def send_reminder(self, item: Dict, session: str):
         """发送定时提醒"""
@@ -660,12 +865,6 @@ class ReminderManager:
         except Exception as e:
             logger.error(f"处理撤回时出错: {e}", exc_info=True)
 
-    def _resolve_target_session(self, event: AstrMessageEvent, target_session: str) -> Optional[str]:
-        """解析目标会话"""
-        # 这里需要根据实际需求实现
-        # 暂时返回当前会话
-        return event.unified_msg_origin
-
     def _parse_cron_and_content(self, remaining: str) -> tuple:
         """解析cron表达式和内容"""
         remaining_parts = remaining.split(maxsplit=5)
@@ -691,31 +890,14 @@ class ReminderManager:
 
         return cron_expr, content_text.strip()
 
-    def _parse_edit_params(self, remaining: str) -> tuple:
-        """解析编辑参数 - 简化版
-
-        优先级顺序：
-        1. @xxx 或 #xxx -> 目标会话（已在上级处理）
-        2. [r...] -> 撤回配置（在内容处理时解析）
-        3. 5段cron表达式 -> cron
-        4. 剩余部分 -> 内容
-        """
-        if not remaining.strip():
-            return None, None
-
-        parts = remaining.strip().split()
-        if not parts:
-            return None, None
-
-        # 尝试解析为cron表达式（需要至少5段）
+    def _parse_edit_params_from_tokens(self, tokens: List[str]) -> tuple:
+        """从 token 列表解析 cron 与内容。"""
         cron_expr = None
         content_start_idx = 0
 
-        if len(parts) >= 5:
-            # 测试前5段是否构成有效的cron表达式
-            cron_candidate = parts[:5]
+        if len(tokens) >= 5:
+            cron_candidate = tokens[:5]
             try:
-                # 清理第5段（周）
                 cleaned_last = self._clean_cron_part(cron_candidate[4])
                 if cleaned_last:
                     cron_candidate[4] = cleaned_last
@@ -724,16 +906,45 @@ class ReminderManager:
                     cron_expr = test_cron
                     content_start_idx = 5
             except Exception:
-                # 不是有效的cron表达式，所有内容都作为文本
                 pass
 
-        # 剩余部分都是内容
-        if content_start_idx < len(parts):
-            content_text = ' '.join(parts[content_start_idx:])
+        if content_start_idx < len(tokens):
+            content_text = ' '.join(tokens[content_start_idx:])
         else:
             content_text = None
 
         return cron_expr, content_text
+
+    def _extract_message_tokens(self, event: AstrMessageEvent) -> List[str]:
+        """从消息链提取文本 token（忽略非文本组件）。"""
+        tokens: List[str] = []
+        for msg_comp in event.get_messages():
+            if isinstance(msg_comp, Plain):
+                text = msg_comp.text or ""
+                if text.strip():
+                    tokens.extend(text.split())
+        return tokens
+
+    def _split_edit_remaining_tokens(self, tokens: List[str]) -> tuple[List[str], List[str]]:
+        """剥离命令头与会话参数后的 token 列表。"""
+        if len(tokens) < 2:
+            return [], []
+
+        remaining_tokens = tokens[2:]
+        session_params: List[str] = []
+        filtered_remaining: List[str] = []
+
+        for part in remaining_tokens:
+            if part.startswith('@') or part.startswith('#'):
+                normalized = normalize_session_param_token(part)
+                if normalized:
+                    session_params.append(normalized)
+                else:
+                    filtered_remaining.append(part)
+            else:
+                filtered_remaining.append(part)
+
+        return session_params, filtered_remaining
 
     def _clean_cron_part(self, part: str) -> str:
         """清理cron表达式的部分"""
@@ -756,6 +967,8 @@ class ReminderManager:
 
     async def _process_reminder_content(self, event, item: Dict, content_text: str, cron_expr: str):
         """处理提醒内容（新增和编辑都使用相同逻辑）"""
+        used_inline_content = False
+        used_reply_content = False
         recall_after_seconds = None
         recall_time_token = ""
 
@@ -772,6 +985,19 @@ class ReminderManager:
             lambda comp: self.plugin._save_media_component(comp, getattr(comp, 'type', 'media').lower()),
         )
         inline_structure = normalize_message_structure(inline_structure, recall_time_token)
+        used_inline_content = bool(inline_structure)
+
+        if not inline_structure and content_text.strip():
+            token_offset = self._calc_edit_content_token_offset(event)
+            ordered_structure = await extract_message_structure_after_token_count(
+                event.get_messages(),
+                token_offset,
+                lambda comp: self.plugin._save_media_component(comp, getattr(comp, 'type', 'media').lower()),
+            )
+            ordered_structure = normalize_message_structure(ordered_structure, recall_time_token)
+            if ordered_structure:
+                inline_structure = ordered_structure
+                used_inline_content = True
 
         reply_structure = await fetch_reply_message_structure(
             event,
@@ -780,6 +1006,7 @@ class ReminderManager:
             self.plugin._save_media_component,
             logger,
         )
+        used_reply_content = bool(reply_structure)
 
         # 合并消息结构
         message_structure = []
@@ -790,9 +1017,8 @@ class ReminderManager:
         elif reply_structure:
             message_structure = reply_structure
 
-        # 如果没有从事件中提取到内容，但提供了 content_text，则作为文本内容
+        # 如果没有从消息链中提取到内容，但提供了 content_text，则作为文本内容
         if not message_structure and content_text.strip():
-            # 将 content_text 转换为消息结构，标准化其中的 [at:xxx] 等标记
             text_structure = [{'type': 'text', 'content': content_text.strip()}]
             text_structure = normalize_message_structure(text_structure, recall_time_token)
             message_structure = text_structure
@@ -803,6 +1029,20 @@ class ReminderManager:
         item['message_structure'] = message_structure
         if recall_after_seconds is not None:
             item['recall_after_seconds'] = recall_after_seconds
+
+        return used_inline_content, used_reply_content
+
+    def _calc_edit_content_token_offset(self, event: AstrMessageEvent) -> int:
+        """计算编辑提醒时内容在文本 token 序列中的起始偏移。"""
+        tokens = self._extract_message_tokens(event)
+        if len(tokens) < 2:
+            return 0
+
+        session_params, remaining_tokens = self._split_edit_remaining_tokens(tokens)
+        cron_expr, _ = self._parse_edit_params_from_tokens(remaining_tokens)
+        if cron_expr:
+            return 2 + len(session_params) + 5
+        return 2 + len(session_params)
 
     async def _execute_linked_command(self, linked_task_data: str | Dict, unified_msg_origin: str, item: Dict):
         """执行单个链接任务"""
@@ -839,6 +1079,22 @@ class ReminderManager:
             elif comp.get('type') == 'atall':
                 original_components.append(At(qq="all"))
 
+        # 去重组件，避免重复 At/AtAll/Face
+        deduped = []
+        seen = set()
+        for comp in original_components:
+            if isinstance(comp, At):
+                key = ("at", "all" if str(comp.qq).lower() == "all" else str(comp.qq))
+            elif isinstance(comp, Face):
+                key = ("face", str(comp.id))
+            else:
+                key = (comp.__class__.__name__, str(comp))
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(comp)
+        original_components = deduped
+
         logger.info(f"执行链接任务命令: {command}, 组件数: {len(original_components)}")
 
         if command:
@@ -849,7 +1105,10 @@ class ReminderManager:
     async def send_now(self, event: AstrMessageEvent) -> AsyncGenerator[str, None]:
         """立即发送提醒"""
         try:
-            import re
+            # 权限检查
+            if not self._is_allowed(event):
+                yield "❌ 抱歉，你没有权限使用该指令。"
+                return
 
             # 解析参数
             parts = event.message_str.strip().split(maxsplit=1)

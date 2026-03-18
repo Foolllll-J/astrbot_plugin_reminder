@@ -10,6 +10,7 @@ from astrbot.api.message_components import At, Face
 from .utils import (
     collect_text_from_message_structure,
     normalize_message_structure,
+    is_user_allowed,
 )
 
 
@@ -318,12 +319,4 @@ class LinkedTaskManager:
 
     def _is_allowed(self, event: AstrMessageEvent) -> bool:
         """检查用户是否有权限使用该插件"""
-        try:
-            if event.is_admin():
-                return True
-            whitelist = self.plugin.config.get('whitelist', [])
-            if not whitelist:
-                return True
-            return event.get_sender_id() in whitelist
-        except Exception:
-            return True
+        return is_user_allowed(self.plugin, event)
