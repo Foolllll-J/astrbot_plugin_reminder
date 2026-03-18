@@ -118,10 +118,6 @@ class ReminderPlugin(Star):
         except Exception as e:
             logger.warning(f"发送\"自动撤回不支持\"提示失败: {e}")
 
-    async def _send_aiocqhttp_with_message_id(self, item: Dict, unified_msg_origin: str):
-        """使用 aiocqhttp 发送消息并返回 message_id"""
-        return await send_aiocqhttp_with_message_id(self, item, unified_msg_origin)
-
     async def _save_media_component(self, msg_comp, prefix: str):
         """保存媒体组件到本地"""
         return await save_media_component(self, msg_comp, prefix)
@@ -129,8 +125,6 @@ class ReminderPlugin(Star):
     async def _recall_message_later(self, unified_msg_origin: str, message_id, delay_seconds: int):
         """延迟撤回消息"""
         await recall_message_later(self, unified_msg_origin, message_id, delay_seconds)
-
-
 
     @filter.command("添加任务")
     async def add_task(self, event: AstrMessageEvent):

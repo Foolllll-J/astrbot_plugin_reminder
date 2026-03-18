@@ -185,9 +185,11 @@ class EventFactory:
             "sender": {"user_id": creator_id, "nickname": creator_name or "用户"},
             "self_id": msg.self_id,
         }
-        
+
         if message_type == MessageType.GROUP_MESSAGE:
             msg.raw_message["group_id"] = msg.group_id
+        else:
+            msg.raw_message["user_id"] = session_id
 
         return msg
 

@@ -2,19 +2,23 @@
 任务管理器 - 处理定时任务相关的所有业务逻辑
 """
 
+import re
+import datetime
 from typing import Dict, List, Optional, AsyncGenerator
+
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent
-from apscheduler.triggers.cron import CronTrigger
+from astrbot.core.platform.astrbot_message import MessageType
 from astrbot.api.message_components import At
+from apscheduler.triggers.cron import CronTrigger
 
 from .utils import (
     build_job_id,
     collect_text_from_message_structure,
     describe_origin,
     extract_inline_message_structure,
-    fetch_reply_message_structure,
     normalize_message_structure,
+    resolve_session_origin,
     translate_to_apscheduler_cron,
 )
 from .event_factory import EventFactory
@@ -29,10 +33,6 @@ class TaskManager:
     async def add_task(self, event: AstrMessageEvent) -> AsyncGenerator[str, None]:
         """添加定时任务"""
         try:
-            from .utils import resolve_session_origin
-            from astrbot.core.platform.astrbot_message import MessageType
-            import re
-
             parts = event.message_str.strip().split(maxsplit=2)
             if len(parts) < 3:
                 yield "❌ 参数缺失！用法: /添加任务 <任务名称> <cron表达式> <指令>"
@@ -92,6 +92,7 @@ class TaskManager:
                 'creator_name': event.get_sender_name(),
                 'is_admin': event.is_admin(),
                 'self_id': event.get_self_id(),
+                'created_at': datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
             }
 
             # 处理指令内容
@@ -115,8 +116,6 @@ class TaskManager:
     async def edit_task(self, event: AstrMessageEvent) -> AsyncGenerator[str, None]:
         """编辑定时任务"""
         try:
-            from .utils import resolve_session_origin, describe_origin
-
             parts = event.message_str.strip().split(maxsplit=2)
             if len(parts) < 2:
                 yield "❌ 参数缺失！用法: /编辑任务 <任务名称或序号> [@好友号|#群号] [cron表达式] [指令]\n提示: 所有参数都可选，可单独或组合编辑"
@@ -163,7 +162,6 @@ class TaskManager:
                 return
 
             # 检查是否包含会话参数
-            from astrbot.core.platform.astrbot_message import MessageType
             session_params = []
             remaining_parts = remaining.strip().split()
             filtered_remaining = []
@@ -215,6 +213,10 @@ class TaskManager:
             if command:
                 await self._process_command_content(event, target_item, command, cron_expr or target_item.get('cron_expr', ''))
 
+            # 如果有任何变更，记录编辑时间
+            if session_changed or cron_expr or command:
+                target_item['edited_at'] = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+
             # 保存更新
             self.plugin._save_reminders()
 
@@ -241,18 +243,28 @@ class TaskManager:
                 yield "❌ 参数缺失！用法: /删除任务 <任务名称或序号>"
                 return
 
+            # 获取过滤后的任务列表（只包含任务）
+            task_items = [item for item in self.plugin.reminders if item.get('is_task', False)]
+
             # 查找目标任务
             target_index = None
             if key.isdigit():
                 idx = int(key) - 1
-                if 0 <= idx < len(self.plugin.reminders):
-                    item = self.plugin.reminders[idx]
-                    if item.get('is_task', False):
-                        target_index = idx
+                if 0 <= idx < len(task_items):
+                    target_item = task_items[idx]
+                    # 在原始列表中找到对应的索引
+                    for i, item in enumerate(self.plugin.reminders):
+                        if item['name'] == target_item['name']:
+                            target_index = i
+                            break
             else:
-                for i, item in enumerate(self.plugin.reminders):
-                    if item.get('is_task', False) and item.get('name') == key:
-                        target_index = i
+                for i, item in enumerate(task_items):
+                    if item.get('name') == key:
+                        # 在原始列表中找到对应的索引
+                        for j, orig_item in enumerate(self.plugin.reminders):
+                            if orig_item['name'] == key:
+                                target_index = j
+                                break
                         break
 
             if target_index is None:
@@ -261,7 +273,7 @@ class TaskManager:
 
             # 移除调度
             target_item = self.plugin.reminders[target_index]
-            job_id = build_job_id(target_item['name'], True)
+            job_id = build_job_id(target_item['name'], target_item.get('session', ''))
             if job_id in self.plugin.scheduler.get_jobs():
                 self.plugin.scheduler.remove_job(job_id)
 
@@ -330,7 +342,11 @@ class TaskManager:
                     info_text += "🎯 当前未在任何会话启用\n"
 
                 info_text += f"⏰ 定时规则: {target_item.get('cron', target_item.get('cron_expr', 'N/A'))}\n"
-                info_text += f"📅 创建时间: {target_item.get('created_at', 'N/A')}\n"
+                # 优先显示编辑时间，如果没有则显示创建时间
+                if target_item.get('edited_at'):
+                    info_text += f"📅 最后编辑: {target_item['edited_at']}\n"
+                else:
+                    info_text += f"📅 创建时间: {target_item.get('created_at', 'N/A')}\n"
                 info_text += f"👤 创建者ID: {target_item.get('created_by', '未知')}\n"
                 info_text += f"\n🔧 执行指令:\n{target_item.get('command', 'N/A')}\n"
 
@@ -350,10 +366,6 @@ class TaskManager:
     async def toggle_task_session(self, event: AstrMessageEvent, enable: bool) -> AsyncGenerator[str, None]:
         """启动或停止任务"""
         try:
-            from .utils import resolve_session_origin
-            from astrbot.core.platform.astrbot_message import MessageType
-            from typing import List
-
             # 权限检查
             if not self._is_allowed(event):
                 yield "❌ 抱歉，你没有权限使用该指令。"
@@ -545,39 +557,45 @@ class TaskManager:
         return cron_expr, command.strip()
 
     def _parse_edit_params(self, remaining: str) -> tuple:
-        """解析编辑参数"""
-        remaining_parts = remaining.strip().split(maxsplit=5)
+        """解析编辑参数 - 简化版
 
-        # 尝试解析为cron表达式
+        优先级顺序：
+        1. @xxx 或 #xxx -> 目标会话（已在上级处理）
+        2. 5段cron表达式 -> cron
+        3. 剩余部分 -> 指令
+        """
+        if not remaining.strip():
+            return None, None
+
+        parts = remaining.strip().split()
+        if not parts:
+            return None, None
+
+        # 尝试解析为cron表达式（需要至少5段）
         cron_expr = None
-        if len(remaining_parts) >= 5:
-            cron_parts = remaining_parts[:5]
-            last_part = cron_parts[4]
-            cleaned_last_part = self._clean_cron_part(last_part)
+        command_start_idx = 0
 
-            if cleaned_last_part:
-                cron_parts[4] = cleaned_last_part
-                new_cron = ' '.join(cron_parts)
+        if len(parts) >= 5:
+            # 测试前5段是否构成有效的cron表达式
+            cron_candidate = parts[:5]
+            try:
+                # 清理第5段（周）
+                cleaned_last = self._clean_cron_part(cron_candidate[4])
+                if cleaned_last:
+                    cron_candidate[4] = cleaned_last
+                    test_cron = ' '.join(cron_candidate)
+                    CronTrigger.from_crontab(translate_to_apscheduler_cron(test_cron))
+                    cron_expr = test_cron
+                    command_start_idx = 5
+            except Exception:
+                # 不是有效的cron表达式，所有内容都作为指令
+                pass
 
-                try:
-                    CronTrigger.from_crontab(translate_to_apscheduler_cron(new_cron))
-                    cron_expr = new_cron
-                except Exception:
-                    pass
-
-        # 获取指令部分
-        command = None
-        if len(remaining_parts) > 5:
-            command = remaining_parts[5].strip()
-        elif cron_expr is None:
-            command = remaining.strip()
+        # 剩余部分都是指令
+        if command_start_idx < len(parts):
+            command = ' '.join(parts[command_start_idx:])
         else:
-            last_part = remaining_parts[4]
-            cleaned_last_part = self._clean_cron_part(last_part)
-            if len(last_part) > len(cleaned_last_part):
-                command = last_part[len(cleaned_last_part):].strip()
-            if len(remaining_parts) > 5 and remaining_parts[5]:
-                command = (command + " " + remaining_parts[5]).strip()
+            command = None
 
         return cron_expr, command
 
@@ -601,7 +619,7 @@ class TaskManager:
         return cleaned
 
     async def _process_command_content(self, event, item: Dict, command: str, cron_expr: str):
-        """处理指令内容"""
+        """处理指令内容（新增和编辑都使用相同逻辑）"""
         message_structure = await extract_inline_message_structure(
             event.get_messages(),
             cron_expr,
@@ -621,8 +639,6 @@ class TaskManager:
     async def execute_now(self, event: AstrMessageEvent) -> AsyncGenerator[str, None]:
         """立即执行任务"""
         try:
-            import re
-
             # 解析参数
             parts = event.message_str.strip().split(maxsplit=1)
             if len(parts) < 2:

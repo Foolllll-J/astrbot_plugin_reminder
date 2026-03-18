@@ -1,12 +1,18 @@
+import asyncio
+import hashlib
+import json
 import os
 import re
-import aiohttp
+import time
 from collections.abc import Awaitable, Callable
+from pathlib import Path
 from typing import Any, Dict, List, Optional
+
+import aiohttp
 from apscheduler.triggers.cron import CronTrigger
 from astrbot.api import logger
 from astrbot.api.event import MessageChain
-from astrbot.api.message_components import Image, Record, Video
+from astrbot.api.message_components import At, Face, Image, Plain, Record, Video
 
 
 def translate_to_apscheduler_cron(cron_expr: str) -> str:
@@ -144,8 +150,6 @@ async def extract_message_structure_from_components(
     save_media: Callable[[Any], Awaitable[Optional[Dict[str, Any]]]],
 ) -> List[Dict[str, Any]]:
     """从消息组件列表中提取 reminder 可持久化的消息结构。"""
-    from astrbot.api.message_components import At, Face, Plain
-
     message_structure: List[Dict[str, Any]] = []
     for msg_comp in components:
         if isinstance(msg_comp, Plain):
@@ -172,8 +176,6 @@ async def extract_inline_message_structure(
     save_media: Callable[[Any], Awaitable[Optional[Dict[str, Any]]]],
 ) -> List[Dict[str, Any]]:
     """提取指令消息中 cron 之后的提醒内容。"""
-    from astrbot.api.message_components import At, Face, Plain
-
     message_structure: List[Dict[str, Any]] = []
     cron_found = False
 
@@ -336,8 +338,6 @@ async def build_message_structure_from_onebot_segments(
     save_media: Callable[[Any, str], Awaitable[Optional[Dict[str, Any]]]],
 ) -> List[Dict[str, Any]]:
     """将 get_msg 返回的 OneBot 消息段转换为 reminder message_structure。"""
-    from astrbot.api.message_components import Image, Record, Video
-
     message_structure: List[Dict[str, Any]] = []
     for seg in segments or []:
         if not isinstance(seg, dict):
@@ -418,8 +418,6 @@ async def fetch_reply_message_structure(
 
 def build_component_from_item(msg_item: Dict[str, Any], data_dir: str, logger: Any) -> Optional[Any]:
     """从持久化的 message_structure 还原单个消息组件。"""
-    from astrbot.api.message_components import At, Face, Image, Plain, Record, Video
-
     item_type = msg_item.get("type")
     if item_type == "text":
         return Plain(msg_item.get("content", ""))
@@ -490,7 +488,6 @@ def load_reminders(plugin):
     try:
         if os.path.exists(plugin.data_file):
             with open(plugin.data_file, 'r', encoding='utf-8') as f:
-                import json
                 data = json.load(f)
                 plugin.reminders = data.get('reminders', [])
                 plugin.linked_tasks = data.get('linked_tasks', {})
@@ -507,7 +504,6 @@ def load_reminders(plugin):
 def save_reminders(plugin):
     """保存提醒数据到文件"""
     try:
-        import json
         data = {
             'reminders': plugin.reminders,
             'linked_tasks': plugin.linked_tasks
@@ -521,7 +517,7 @@ def save_reminders(plugin):
         logger.error(f"保存数据失败: {e}", exc_info=True)
 
 
-def restore_reminders(plugin):
+async def restore_reminders(plugin):
     """恢复提醒任务"""
     try:
         if not plugin.reminders:
@@ -537,7 +533,6 @@ def restore_reminders(plugin):
                     item['enabled_sessions'] = item['sessions']
 
                 # 恢复调度
-                import asyncio
                 asyncio.create_task(schedule_reminder(plugin, item))
                 count += 1
             except Exception as e:
@@ -753,7 +748,6 @@ async def send_aiocqhttp_with_message_id(plugin, item: Dict, unified_msg_origin:
             full_path = os.path.join(plugin.data_dir, msg_item.get('path', ''))
             if os.path.exists(full_path):
                 try:
-                    from pathlib import Path
                     file_uri = Path(full_path).resolve().as_uri()
                 except Exception:
                     file_uri = full_path
@@ -762,7 +756,6 @@ async def send_aiocqhttp_with_message_id(plugin, item: Dict, unified_msg_origin:
             full_path = os.path.join(plugin.data_dir, msg_item.get('path', ''))
             if os.path.exists(full_path):
                 try:
-                    from pathlib import Path
                     file_uri = Path(full_path).resolve().as_uri()
                 except Exception:
                     file_uri = full_path
@@ -771,7 +764,6 @@ async def send_aiocqhttp_with_message_id(plugin, item: Dict, unified_msg_origin:
             full_path = os.path.join(plugin.data_dir, msg_item.get('path', ''))
             if os.path.exists(full_path):
                 try:
-                    from pathlib import Path
                     file_uri = Path(full_path).resolve().as_uri()
                 except Exception:
                     file_uri = full_path
@@ -796,7 +788,6 @@ async def recall_message_later(plugin, unified_msg_origin: str, message_id: int 
         return
 
     try:
-        import asyncio
         await asyncio.sleep(delay_seconds)
 
         platform_id = unified_msg_origin.split(':', 1)[0] if ':' in unified_msg_origin else ""
@@ -832,8 +823,6 @@ async def save_media_component(plugin, msg_comp: Image | Record | Video, prefix:
             return None
 
         # 生成文件名
-        import time
-        import hashlib
         timestamp = time.strftime('%Y%m%d_%H%M%S')
         ext = {
             'image': '.jpg',
@@ -880,29 +869,80 @@ async def send_reminder(plugin, item: Dict, session: str):
             logger.warning(f"提醒 '{item.get('name')}' 没有内容，跳过发送")
             return
 
-        # 构建消息链
-        chain = build_message_chain_from_structure(
-            message_structure,
-            plugin.data_dir,
-            logger
-        )
+        # 按平台限制拆分消息
+        from .utils import split_message_structure, build_message_chain_from_structure, extract_message_id
+        message_chunks = split_message_structure(message_structure)
 
-        if not chain:
-            logger.warning(f"提醒 '{item.get('name')}' 消息链构建失败")
+        if not message_chunks:
+            logger.warning(f"提醒 '{item.get('name')}' 消息为空")
             return
 
-        # 包装成 MessageChain 对象
-        message_chain = MessageChain()
-        message_chain.chain = chain
+        recall_after_seconds = int(item.get('recall_after_seconds', 0) or 0)
+        message_ids = []
 
-        # 发送消息
-        await plugin.context.send_message(session, message_chain)
-        logger.info(f"提醒 '{item.get('name')}' 已发送到 {session}")
+        # 检查撤回支持
+        recall_supported = False
+        recall_reason = ""
+        if recall_after_seconds > 0:
+            recall_supported, recall_reason = check_recall_capability(plugin, session)
+            if not recall_supported:
+                logger.warning(
+                    f"提醒 '{item.get('name', 'unknown')}' 配置了自动撤回，但{recall_reason}，本次仅发送不撤回")
+
+        for chunk in message_chunks:
+            chain = build_message_chain_from_structure(
+                chunk,
+                plugin.data_dir,
+                logger
+            )
+
+            if not chain:
+                continue
+
+            message_id = None
+            # 如果需要撤回且平台支持，使用 aiocqhttp API 发送
+            if recall_after_seconds > 0 and recall_supported:
+                message_id = await send_aiocqhttp_with_message_id(
+                    plugin,
+                    {'message_structure': chunk},
+                    session,
+                )
+
+            # 如果 aiocqhttp 发送失败或不支持撤回，使用普通方式发送
+            if message_id is None:
+                message_chain = MessageChain()
+                message_chain.chain = chain
+                send_ret = await plugin.context.send_message(session, message_chain)
+                message_id = extract_message_id(send_ret)
+
+            if message_id is not None:
+                message_ids.append(message_id)
 
         # 处理撤回
-        recall_after_seconds = item.get('recall_after_seconds', 0)
-        if recall_after_seconds > 0:
-            await handle_recall(plugin, item, session, recall_after_seconds)
+        if recall_after_seconds > 0 and recall_supported:
+            if message_ids:
+                for message_id in message_ids:
+                    asyncio.create_task(
+                        recall_message_later(session, message_id, recall_after_seconds))
+            else:
+                logger.warning(f"提醒已发送但未拿到 message_id，无法自动撤回: {item.get('name')}")
+
+        logger.info(f"提醒 '{item.get('name')}' 已发送到 {session}")
+
+        # 处理链接任务
+        linked_commands = plugin.linked_tasks.get(item.get('name'), [])
+        if linked_commands:
+            logger.info(f"提醒 '{item.get('name')}' 有 {len(linked_commands)} 个链接任务，开始执行")
+            from .reminder_manager import ReminderManager
+            reminder_manager = ReminderManager(plugin)
+            tasks = []
+            for linked_command in linked_commands:
+                task = asyncio.create_task(reminder_manager._execute_linked_command(linked_command, session, item))
+                tasks.append(task)
+
+            if tasks:
+                await asyncio.gather(*tasks, return_exceptions=True)
+                logger.info(f"提醒 '{item.get('name')}' 的所有链接任务执行完成")
 
     except Exception as e:
         logger.error(f"发送提醒 '{item.get('name')}' 时出错: {e}", exc_info=True)
@@ -929,11 +969,59 @@ async def handle_recall(plugin, item: Dict, session: str, delay_seconds: int):
         logger.error(f"处理撤回时出错: {e}", exc_info=True)
 
 
+async def execute_linked_command(plugin, command: str, unified_msg_origin: str, item: Dict,
+                                original_components: list = None, is_admin: bool = True,
+                                self_id: str = None):
+    """执行链接命令的通用函数"""
+    try:
+        from .event_factory import EventFactory
+        from astrbot.api.message_components import At, Face
+
+        logger.info(f"执行链接任务: {command}")
+
+        # 如果没有传入组件，从 command 文本中解析组件（兼容历史数据）
+        if not original_components:
+            original_components = []
+            from .utils import normalize_message_structure
+            cmd_structure = normalize_message_structure([{'type': 'text', 'content': command}])
+            for comp in cmd_structure:
+                if comp.get('type') == 'at':
+                    original_components.append(At(qq=comp.get('qq', '')))
+                elif comp.get('type') == 'atall':
+                    original_components.append(At(qq="all"))
+                elif comp.get('type') == 'face':
+                    original_components.append(Face(id=comp.get('id')))
+
+        # 创建事件并派发
+        event_factory = EventFactory(plugin.context)
+        event = event_factory.create_event(
+            unified_msg_origin,
+            command,
+            item.get('created_by', 'timer'),
+            item.get('creator_name', 'Timer'),
+            original_components=original_components or [],
+            is_admin=is_admin,
+            self_id=self_id
+        )
+
+        try:
+            event.set_extra("reminder_timer_origin", True)
+        except Exception:
+            pass
+
+        # 派发事件
+        plugin.context.get_event_queue().put_nowait(event)
+        logger.info(f"链接任务已派发: {command}")
+
+    except Exception as e:
+        logger.error(f"执行链接命令失败: {e}", exc_info=True)
+
+
 async def execute_task(plugin, item: Dict, session: str):
     """执行定时任务"""
     try:
         from .event_factory import EventFactory
-        from astrbot.api.message_components import At
+        from astrbot.api.message_components import At, Face
 
         command = item.get('command', '')
         if not command:
@@ -949,6 +1037,10 @@ async def execute_task(plugin, item: Dict, session: str):
         for comp_data in original_components:
             if comp_data.get('type') == 'at':
                 component_list.append(At(qq=comp_data.get('qq')))
+            elif comp_data.get('type') == 'atall':
+                component_list.append(At(qq="all"))
+            elif comp_data.get('type') == 'face':
+                component_list.append(Face(id=comp_data.get('id')))
 
         logger.info(f"任务 '{item.get('name')}' 执行: {command}")
 
