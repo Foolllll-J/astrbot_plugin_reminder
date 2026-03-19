@@ -621,7 +621,63 @@ def build_message_chain_from_structure(
 ) -> List[Any]:
     """从 message_structure 还原一条可发送的消息链。"""
     chain: List[Any] = []
-    for msg_item in message_structure or []:
+
+    def _needs_space_after_at(text: str) -> tuple[bool, bool, str]:
+        if not text:
+            return False, False, text
+        first = text[0]
+        if first in "\n\r":
+            return False, False, text
+        if first in ",.!?;:，。！？；：）)]}】》、":
+            return False, False, text
+
+        i = 0
+        n = len(text)
+        while i < n and text[i].isspace():
+            i += 1
+        if i == 0:
+            return True, False, text
+
+        leading = text[:i]
+        if "\n" in leading or "\r" in leading:
+            return False, True, text
+
+        return True, True, text[i:].lstrip(" \t")
+
+    def _inject_space_after_at(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        adjusted: List[Dict[str, Any]] = []
+        i = 0
+        while i < len(items):
+            item = items[i]
+            adjusted.append(item)
+            if item.get("type") in {"at", "atall"} and i + 1 < len(items):
+                nxt = items[i + 1]
+                if nxt.get("type") == "text":
+                    content = nxt.get("content", "")
+                    need_space, had_leading, stripped = _needs_space_after_at(content)
+                    if need_space:
+                        if had_leading:
+                            # 已有前导空格：归一化为单空格放回原文本段
+                            adjusted.append({"type": "text", "content": " " + stripped})
+                        else:
+                            # 无前导空格：单独插入空格段，避免平台裁剪前导空格
+                            adjusted.append({"type": "text", "content": " "})
+                            if stripped:
+                                adjusted.append({"type": "text", "content": stripped})
+                        i += 2
+                        continue
+            i += 1
+        return adjusted
+
+    adjusted_items = _inject_space_after_at(message_structure or [])
+    if message_structure != adjusted_items:
+        logger.debug(
+            "[reminder] build_message_chain_from_structure adjusted items: %s -> %s",
+            message_structure,
+            adjusted_items,
+        )
+
+    for msg_item in adjusted_items:
         component = build_component_from_item(msg_item, data_dir, logger)
         if component is not None:
             chain.append(component)
