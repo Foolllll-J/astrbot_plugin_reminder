@@ -189,7 +189,7 @@ class EventFactory:
         if message_type == MessageType.GROUP_MESSAGE:
             msg.raw_message["group_id"] = msg.group_id
         else:
-            msg.raw_message["user_id"] = session_id
+            msg.raw_message["user_id"] = creator_id
 
         return msg
 
