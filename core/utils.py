@@ -69,6 +69,280 @@ def parse_recall_seconds(content_text: str) -> tuple[Optional[int], str]:
     return None, content_text
 
 
+def parse_execution_limit_token(token: str) -> Optional[int]:
+    """解析执行轮次参数 token，仅支持 `[-数字]`。"""
+    if re.fullmatch(r"\[-\d+\]", token):
+        return max(0, int(token[2:-1]))
+    return None
+
+
+def extract_execution_limit_from_tokens(tokens: List[str]) -> tuple[bool, Optional[int], List[str]]:
+    """从 token 列表开头提取执行轮次参数。"""
+    if not tokens:
+        return False, None, tokens
+
+    parsed = parse_execution_limit_token(tokens[0])
+    if parsed is None:
+        return False, None, tokens
+    return True, parsed, tokens[1:]
+
+
+def extract_plain_text_tokens(message_components: List[Any]) -> List[str]:
+    """从消息组件中提取纯文本 token（忽略非文本组件）。"""
+    tokens: List[str] = []
+    for msg_comp in message_components:
+        if isinstance(msg_comp, Plain):
+            text = msg_comp.text or ""
+            if text.strip():
+                tokens.extend(text.split())
+    return tokens
+
+
+def clean_cron_part(part: str) -> str:
+    """清理 cron 的单个字段，兼容末段与后续文本粘连。"""
+    cleaned = ""
+    for i, char in enumerate(part):
+        if char.isalnum() or char in "*-,/":
+            if char.isdigit():
+                digit_count = 1
+                for j in range(i + 1, min(i + 10, len(part))):
+                    if part[j].isdigit():
+                        digit_count += 1
+                    else:
+                        break
+                if digit_count > 3:
+                    break
+            cleaned += char
+        else:
+            break
+    return cleaned
+
+
+def parse_cron_payload_from_tokens(tokens: List[str]) -> tuple[Optional[str], Optional[str]]:
+    """从 token 列表开头解析可选 cron 与其后的文本载荷。"""
+    cron_expr, consumed_count, attached_payload = parse_cron_from_token_head(tokens)
+    if not cron_expr:
+        payload_text = " ".join(tokens).strip() if tokens else None
+        return None, payload_text
+
+    payload_tokens = tokens[consumed_count:]
+    payload_text = " ".join(payload_tokens).strip()
+    if attached_payload:
+        payload_text = f"{attached_payload} {payload_text}".strip() if payload_text else attached_payload
+    return cron_expr, (payload_text if payload_text else None)
+
+
+def parse_cron_from_token_head(tokens: List[str]) -> tuple[Optional[str], int, str]:
+    """从 token 列表开头解析 cron，返回 (cron_expr, 消耗 token 数, 末段粘连正文)。"""
+    if len(tokens) < 5:
+        return None, 0, ""
+
+    cron_candidate = tokens[:5]
+    try:
+        last_part = cron_candidate[4]
+        cleaned_last = clean_cron_part(last_part)
+        if not cleaned_last:
+            return None, 0, ""
+
+        cron_candidate[4] = cleaned_last
+        test_cron = " ".join(cron_candidate)
+        CronTrigger.from_crontab(translate_to_apscheduler_cron(test_cron))
+
+        attached_payload = last_part[len(cleaned_last) :].strip() if len(last_part) > len(cleaned_last) else ""
+        return test_cron, 5, attached_payload
+    except Exception:
+        return None, 0, ""
+
+
+def _consume_leading_scene_options(
+    tokens: List[str],
+    *,
+    collect_multiple_sessions: bool,
+) -> Dict[str, Any]:
+    """消费前缀参数（会话、执行轮次），直到遇到首个非参数 token。"""
+    sessions: List[str] = []
+    max_executions: Optional[int] = None
+    limit_updated = False
+    idx = 0
+    consumed_session_indexes: List[int] = []
+    limit_token_index: Optional[int] = None
+
+    while idx < len(tokens):
+        token = tokens[idx]
+
+        parsed_limit = parse_execution_limit_token(token)
+        if parsed_limit is not None and not limit_updated:
+            max_executions = parsed_limit
+            limit_updated = True
+            limit_token_index = idx
+            idx += 1
+            continue
+
+        normalized_session = normalize_session_param_token(token)
+        if normalized_session:
+            if collect_multiple_sessions:
+                sessions.append(normalized_session)
+            elif not sessions:
+                sessions.append(normalized_session)
+            else:
+                break
+            consumed_session_indexes.append(idx)
+            idx += 1
+            continue
+
+        break
+
+    remaining_tokens = tokens[idx:]
+    if consumed_session_indexes:
+        session_index_set = set(consumed_session_indexes)
+        tokens_without_session = [token for i, token in enumerate(tokens) if i not in session_index_set]
+    else:
+        tokens_without_session = list(tokens)
+
+    if limit_token_index is not None:
+        tokens_without_limit = [token for i, token in enumerate(tokens) if i != limit_token_index]
+    else:
+        tokens_without_limit = list(tokens)
+
+    return {
+        "sessions": sessions,
+        "max_executions": max_executions,
+        "limit_updated": limit_updated,
+        "consumed_count": idx,
+        "remaining_tokens": remaining_tokens,
+        "tokens_without_session": tokens_without_session,
+        "tokens_without_limit": tokens_without_limit,
+    }
+
+
+def parse_edit_scene_tokens(tokens_all: List[str], header_token_count: int = 2) -> Dict[str, Any]:
+    """统一解析编辑场景 token。
+
+    返回:
+    - `session_params`: 解析出的会话参数
+    - `tokens_after_session`: 去除会话参数后的 token
+    - `limit_updated` / `limit_value`: 执行轮次参数
+    - `tokens_after_limit`: 去除轮次参数后的 token
+    - `cron_expr`: 解析出的 cron（可选）
+    - `payload_text`: cron 之后的正文（可选）
+    - `content_token_offset`: 编辑内容在 token 序列中的起始偏移
+    """
+    if header_token_count < 0:
+        header_token_count = 0
+
+    tokens_after_header = tokens_all[header_token_count:] if len(tokens_all) > header_token_count else []
+    option_parse = _consume_leading_scene_options(tokens_after_header, collect_multiple_sessions=True)
+    session_params: List[str] = option_parse["sessions"]
+    limit_updated = bool(option_parse["limit_updated"])
+    limit_value = option_parse["max_executions"]
+    tokens_after_limit = option_parse["tokens_without_limit"]
+    tokens_after_session = option_parse["tokens_without_session"]
+
+    tokens_for_cron = option_parse["remaining_tokens"]
+    cron_expr, cron_consumed, attached_payload = parse_cron_from_token_head(tokens_for_cron)
+    payload_tokens = tokens_for_cron[cron_consumed:] if cron_expr else tokens_for_cron
+    payload_text = " ".join(payload_tokens).strip() if payload_tokens else None
+    if attached_payload:
+        payload_text = f"{attached_payload} {payload_text}".strip() if payload_text else attached_payload
+
+    content_token_offset = header_token_count + int(option_parse["consumed_count"])
+    if cron_expr:
+        content_token_offset += cron_consumed
+
+    return {
+        "session_params": session_params,
+        "tokens_after_session": tokens_after_session,
+        "limit_updated": limit_updated,
+        "limit_value": limit_value,
+        "tokens_after_limit": tokens_after_limit,
+        "cron_expr": cron_expr,
+        "payload_text": payload_text,
+        "content_token_offset": content_token_offset,
+    }
+
+
+def apply_execution_limit(item: Dict, limit_value: int) -> bool:
+    """应用执行轮次限制配置并返回是否发生变化。"""
+    changed = False
+    normalized_limit = max(0, int(limit_value))
+
+    current_limit = item.get("max_executions")
+    try:
+        current_limit_val = int(current_limit) if current_limit is not None else None
+    except Exception:
+        current_limit_val = None
+
+    if current_limit_val != normalized_limit:
+        item["max_executions"] = normalized_limit
+        changed = True
+
+    if normalized_limit > 0:
+        try:
+            executed_count = int(item.get("executed_count", 0) or 0)
+        except Exception:
+            executed_count = 0
+        if executed_count < 0:
+            executed_count = 0
+        if executed_count > normalized_limit:
+            executed_count = normalized_limit
+
+        try:
+            current_executed = int(item.get("executed_count", 0) or 0)
+        except Exception:
+            current_executed = 0
+        if current_executed != executed_count:
+            item["executed_count"] = executed_count
+            changed = True
+    elif "executed_count" in item:
+        item.pop("executed_count", None)
+        changed = True
+
+    return changed
+
+
+def parse_add_scene_arguments(remaining: str, *, parse_recall: bool = False) -> Dict[str, Any]:
+    """统一解析“添加场景”参数。
+
+    统一处理：
+    - 执行轮次参数：`[-数字]`
+    - 目标会话参数：`@好友号` / `#群号`
+    - cron 表达式（5段）
+    - 正文（任务指令或提醒内容）
+    - 提醒撤回参数（可选，`parse_recall=True` 时处理）
+    """
+    tokens = (remaining or "").strip().split()
+    option_parse = _consume_leading_scene_options(tokens, collect_multiple_sessions=False)
+    max_executions = option_parse["max_executions"]
+    session_param = option_parse["sessions"][0] if option_parse["sessions"] else None
+
+    # 添加场景下，cron 必须在参数末尾；cron 后所有内容都视为正文，不再继续解析参数。
+    tokens_after_options = option_parse["remaining_tokens"]
+    cron_expr, cron_consumed, attached_payload = parse_cron_from_token_head(tokens_after_options)
+    payload_tokens = tokens_after_options[cron_consumed:] if cron_expr else []
+    payload_text = " ".join(payload_tokens).strip() if payload_tokens else ""
+    if attached_payload:
+        payload_text = f"{attached_payload} {payload_text}".strip() if payload_text else attached_payload
+
+    recall_after_seconds: Optional[int] = None
+    recall_token = ""
+    payload_without_recall = payload_text
+    if parse_recall:
+        recall_after_seconds, cleaned_payload = parse_recall_seconds(payload_text)
+        if recall_after_seconds is not None:
+            recall_token = payload_text.lstrip().split(maxsplit=1)[0]
+            payload_without_recall = cleaned_payload
+
+    return {
+        "max_executions": max_executions,
+        "session_param": session_param,
+        "cron_expr": cron_expr,
+        "payload_text": payload_text,
+        "recall_after_seconds": recall_after_seconds,
+        "recall_token": recall_token,
+        "payload_without_recall": payload_without_recall,
+    }
+
+
 def format_duration_cn(seconds: int) -> str:
     """将秒数格式化为中文时长。"""
     total = int(seconds or 0)
@@ -365,13 +639,36 @@ def extract_message_id(send_result: Any) -> Optional[int | str]:
     return None
 
 
-def build_job_id(item_id: str, session: str, is_task: bool | None = None) -> str:
-    """根据任务 ID 和会话构建稳定的调度任务 ID。"""
-    safe_session = session.replace(":", "_")
-    if is_task is None:
-        return f"{item_id}::{safe_session}"
+def build_job_id(item_id: str, session: str | None = None, is_task: bool | None = None) -> str:
+    """构建调度任务 ID。
+
+    新格式（单任务单 job）:
+    - ``task::<item_id>`` 或 ``reminder::<item_id>``
+
+    兼容旧格式（按会话）:
+    - ``<item_id>::<session>``
+    - ``task::<item_id>::<session>`` / ``reminder::<item_id>::<session>``
+    """
     prefix = "task" if is_task else "reminder"
-    return f"{prefix}::{item_id}::{safe_session}"
+    if is_task is None:
+        prefix = ""
+
+    if session is None:
+        return f"{prefix}::{item_id}" if prefix else item_id
+
+    safe_session = session.replace(":", "_")
+    if prefix:
+        return f"{prefix}::{item_id}::{safe_session}"
+    return f"{item_id}::{safe_session}"
+
+
+def build_legacy_session_job_ids(item: Dict) -> set[str]:
+    """收集可能存在的旧版会话级 job id，用于清理兼容。"""
+    job_ids: set[str] = set()
+    for session in item.get("enabled_sessions", []) or []:
+        job_ids.add(build_job_id(item.get("name", ""), session, is_task=item.get("is_task", False)))
+        job_ids.add(build_job_id(item.get("name", ""), session, is_task=None))
+    return job_ids
 
 
 def resolve_session_origin(current_origin: str, is_group_message: bool, session_param: str | None) -> str | None:
@@ -778,6 +1075,39 @@ def load_reminders(plugin):
                         item['command'] = normalized_command
                         need_resave = True
 
+            raw_max_executions = item.get("max_executions")
+            if raw_max_executions is None:
+                if "executed_count" in item:
+                    item.pop("executed_count", None)
+                    need_resave = True
+            else:
+                try:
+                    max_executions = int(raw_max_executions)
+                except Exception:
+                    item.pop("max_executions", None)
+                    item.pop("executed_count", None)
+                    need_resave = True
+                else:
+                    if max_executions < 0:
+                        max_executions = 0
+                    if item.get("max_executions") != max_executions:
+                        item["max_executions"] = max_executions
+                        need_resave = True
+
+                    if max_executions > 0:
+                        try:
+                            executed_count = int(item.get("executed_count", 0) or 0)
+                        except Exception:
+                            executed_count = 0
+                        if executed_count < 0:
+                            executed_count = 0
+                        if item.get("executed_count", 0) != executed_count:
+                            item["executed_count"] = executed_count
+                            need_resave = True
+                    elif "executed_count" in item:
+                        item.pop("executed_count", None)
+                        need_resave = True
+
             plugin.reminders.append(item)
 
         migrated_linked_tasks: Dict[str, List[Dict]] = {}
@@ -864,114 +1194,145 @@ async def restore_reminders(plugin):
         logger.error(f"恢复数据失败: {e}", exc_info=True)
 
 
-def add_job(plugin, item: Dict, session: str):
-    """添加任务到调度器"""
+def _ensure_runtime_lock_state(plugin):
+    """初始化运行期锁状态。"""
+    if not hasattr(plugin, "_item_locks"):
+        plugin._item_locks = {}
+
+
+def _item_lock_key(item: Dict) -> str:
+    item_type = "task" if item.get("is_task", False) else "reminder"
+    return f"{item_type}::{item.get('name', '')}"
+
+
+def _get_item_lock(plugin, item: Dict) -> asyncio.Lock:
+    _ensure_runtime_lock_state(plugin)
+    key = _item_lock_key(item)
+    lock = plugin._item_locks.get(key)
+    if lock is None:
+        lock = asyncio.Lock()
+        plugin._item_locks[key] = lock
+    return lock
+
+
+def _cleanup_item_lock(plugin, item: Dict):
+    if not hasattr(plugin, "_item_locks"):
+        return
+    plugin._item_locks.pop(_item_lock_key(item), None)
+
+
+def _find_item_in_runtime(plugin, item: Dict) -> tuple[Optional[int], Optional[Dict]]:
+    for idx, existing in enumerate(plugin.reminders):
+        if existing is item:
+            return idx, existing
+        if (
+            existing.get("name") == item.get("name")
+            and bool(existing.get("is_task", False)) == bool(item.get("is_task", False))
+        ):
+            return idx, existing
+    return None, None
+
+
+def _parse_max_executions(item: Dict) -> Optional[int]:
+    raw = item.get("max_executions")
+    if raw is None:
+        return None
     try:
-        job_id = build_job_id(item.get('name', ''), session, is_task=item.get('is_task', False))
-        legacy_job_id = build_job_id(item.get('name', ''), session, is_task=None)
-        cron_expr = item.get('cron_expr', item.get('cron', ''))
+        value = int(raw)
+    except Exception:
+        return None
+    return value if value > 0 else 0
+
+
+def add_job(plugin, item: Dict, session: str | None = None):
+    """添加任务到调度器（单任务单 job）。"""
+    try:
+        job_id = build_job_id(item.get("name", ""), is_task=item.get("is_task", False))
+        legacy_job_id = build_job_id(item.get("name", ""), is_task=None)
+        cron_expr = item.get("cron_expr", item.get("cron", ""))
         aps_cron = translate_to_apscheduler_cron(cron_expr)
         trigger = CronTrigger.from_crontab(aps_cron)
 
-        # 如果已存在相同ID的任务，先删除
-        for jid in {job_id, legacy_job_id}:
+        cleanup_ids = {job_id, legacy_job_id}
+        cleanup_ids.update(build_legacy_session_job_ids(item))
+        if session:
+            cleanup_ids.add(build_job_id(item.get("name", ""), session, is_task=item.get("is_task", False)))
+            cleanup_ids.add(build_job_id(item.get("name", ""), session, is_task=None))
+
+        for jid in cleanup_ids:
             try:
                 plugin.scheduler.remove_job(jid)
             except Exception:
-                pass  # 任务不存在，正常情况
+                pass
 
         plugin.scheduler.add_job(
             trigger_reminder,
             trigger=trigger,
             id=job_id,
-            args=[plugin, item, session]
+            args=[plugin, item],
+            max_instances=1,
+            coalesce=True,
         )
 
-        # 保存任务映射
-        if not hasattr(plugin, 'job_mapping'):
+        if not hasattr(plugin, "job_mapping"):
             plugin.job_mapping = {}
-        plugin.job_mapping[job_id] = (item, session)
+        plugin.job_mapping[job_id] = item
 
     except Exception as e:
         logger.error(f"添加调度任务失败: {e}", exc_info=True)
         raise
 
 
-def remove_job(plugin, item: Dict, session: str):
-    """从调度器移除任务"""
+def remove_job(plugin, item: Dict, session: str | None = None):
+    """从调度器移除任务（兼容旧签名）。"""
     try:
-        job_id = build_job_id(item.get('name', ''), session, is_task=item.get('is_task', False))
-        legacy_job_id = build_job_id(item.get('name', ''), session, is_task=None)
-
-        # 修复：直接尝试删除任务，如果不存在会抛出异常
-        removed = False
-        for jid in {job_id, legacy_job_id}:
-            try:
-                plugin.scheduler.remove_job(jid)
-                logger.info(f"已移除调度任务: {jid}, 会话: {session}")
-                removed = True
-            except Exception:
-                # 任务不存在时的正常情况，静默处理
-                pass
-        if not removed:
-            logger.debug(f"调度任务不存在，跳过移除: {job_id}, 会话: {session}")
-
-        # 清理任务映射
-        if hasattr(plugin, 'job_mapping') and job_id in plugin.job_mapping:
-            del plugin.job_mapping[job_id]
+        remove_all_jobs_for_item(plugin, item)
     except Exception as e:
         logger.error(f"移除调度任务失败: {e}", exc_info=True)
 
 
 def remove_all_jobs_for_item(plugin, item: Dict):
-    """移除某个任务在所有会话中的调度"""
+    """移除某个任务在所有会话中的调度。"""
     try:
-        # 尝试移除可能存在的多个任务实例（基于映射）
-        if hasattr(plugin, 'job_mapping'):
-            jobs_to_remove = [
-                jid for jid, (itm, _) in list(plugin.job_mapping.items())
-                if itm.get('name') == item.get('name') and
-                   itm.get('is_task', False) == item.get('is_task', False)
-            ]
+        job_ids: set[str] = {
+            build_job_id(item.get("name", ""), is_task=item.get("is_task", False)),
+            build_job_id(item.get("name", ""), is_task=None),
+        }
+        job_ids.update(build_legacy_session_job_ids(item))
 
-            for jid in jobs_to_remove:
-                try:
-                    plugin.scheduler.remove_job(jid)
-                    logger.info(f"已移除调度任务: {jid}")
-                except Exception:
-                    # 任务不存在时的正常情况，静默处理
-                    pass
-                if jid in plugin.job_mapping:
-                    del plugin.job_mapping[jid]
+        if hasattr(plugin, "job_mapping"):
+            for jid, mapped in list(plugin.job_mapping.items()):
+                mapped_item = mapped[0] if isinstance(mapped, tuple) else mapped
+                if not isinstance(mapped_item, dict):
+                    continue
+                if (
+                    mapped_item.get("name") == item.get("name")
+                    and bool(mapped_item.get("is_task", False)) == bool(item.get("is_task", False))
+                ):
+                    job_ids.add(jid)
 
-        # 补充清理（兼容历史/不同ID格式）
-        for session in item.get('enabled_sessions', []) or []:
-            for jid in {
-                build_job_id(item.get('name', ''), session, is_task=item.get('is_task', False)),
-                build_job_id(item.get('name', ''), session, is_task=None),
-            }:
-                try:
-                    plugin.scheduler.remove_job(jid)
-                except Exception:
-                    pass
-                if hasattr(plugin, 'job_mapping') and jid in plugin.job_mapping:
-                    del plugin.job_mapping[jid]
+        for jid in job_ids:
+            try:
+                plugin.scheduler.remove_job(jid)
+            except Exception:
+                pass
+            if hasattr(plugin, "job_mapping") and jid in plugin.job_mapping:
+                del plugin.job_mapping[jid]
 
-        logger.info(f"已移除任务的所有调度: {item.get('name')}")
     except Exception as e:
         logger.error(f"移除任务调度失败: {e}", exc_info=True)
 
 
 async def schedule_reminder(plugin, item: Dict):
-    """调度提醒或任务"""
+    """调度提醒或任务（单任务单 job）。"""
     try:
-        sessions = item.get('enabled_sessions', [])
+        sessions = item.get("enabled_sessions", [])
         if not sessions:
+            remove_all_jobs_for_item(plugin, item)
             logger.warning(f"任务/提醒 '{item.get('name')}' 没有启用的会话，跳过调度")
             return
 
-        for session in sessions:
-            add_job(plugin, item, session)
+        add_job(plugin, item)
 
     except Exception as e:
         logger.error(f"调度任务/提醒失败: {e}", exc_info=True)
@@ -979,14 +1340,10 @@ async def schedule_reminder(plugin, item: Dict):
 
 
 async def reschedule_reminder(plugin, item: Dict):
-    """重新调度提醒或任务"""
+    """重新调度提醒或任务。"""
     try:
-        # 移除旧调度
         remove_all_jobs_for_item(plugin, item)
-
-        # 添加新调度
         await schedule_reminder(plugin, item)
-
         logger.info(f"已重新调度任务/提醒 '{item.get('name')}'")
     except Exception as e:
         logger.error(f"重新调度任务/提醒失败: {e}", exc_info=True)
@@ -1173,18 +1530,56 @@ async def save_media_component(plugin, msg_comp: Image | Record | Video, prefix:
         return None
 
 
-async def trigger_reminder(plugin, item: Dict, session: str):
-    """触发提醒或任务"""
-    try:
-        if item.get('is_task', False):
-            # 执行任务
-            await execute_task(plugin, item, session)
-        else:
-            # 发送提醒
-            await send_reminder(plugin, item, session)
+async def trigger_reminder(plugin, item: Dict):
+    """按轮次触发提醒/任务：单 job 内批量分发至所有启用会话。"""
+    lock = _get_item_lock(plugin, item)
+    async with lock:
+        try:
+            item_index, runtime_item = _find_item_in_runtime(plugin, item)
+            if runtime_item is None:
+                # 数据已被删除，保险清理残留调度
+                remove_all_jobs_for_item(plugin, item)
+                return
 
-    except Exception as e:
-        logger.error(f"触发任务/提醒失败: {e}", exc_info=True)
+            enabled_sessions = list(runtime_item.get("enabled_sessions", []) or [])
+            if not enabled_sessions:
+                remove_all_jobs_for_item(plugin, runtime_item)
+                logger.warning(f"任务/提醒 '{runtime_item.get('name')}' 没有启用会话，已跳过执行")
+                return
+
+            for session in enabled_sessions:
+                try:
+                    if runtime_item.get("is_task", False):
+                        await execute_task(plugin, runtime_item, session)
+                    else:
+                        await send_reminder(plugin, runtime_item, session)
+                except Exception as dispatch_error:
+                    logger.error(
+                        f"任务/提醒 '{runtime_item.get('name')}' 分发到 {session} 失败: {dispatch_error}",
+                        exc_info=True,
+                    )
+
+            max_executions = _parse_max_executions(runtime_item)
+            if max_executions and max_executions > 0:
+                executed_count = int(runtime_item.get("executed_count", 0) or 0) + 1
+                runtime_item["executed_count"] = executed_count
+
+                if executed_count >= max_executions:
+                    remove_all_jobs_for_item(plugin, runtime_item)
+                    if not runtime_item.get("is_task", False):
+                        plugin.linked_tasks.pop(runtime_item.get("name", ""), None)
+                    if item_index is not None and 0 <= item_index < len(plugin.reminders):
+                        plugin.reminders.pop(item_index)
+                    _cleanup_item_lock(plugin, runtime_item)
+                    logger.info(
+                        f"任务/提醒 '{runtime_item.get('name')}' 已达执行上限 "
+                        f"{executed_count}/{max_executions}，已自动移除"
+                    )
+
+                plugin._save_reminders()
+
+        except Exception as e:
+            logger.error(f"触发任务/提醒失败: {e}", exc_info=True)
 
 
 async def send_reminder(plugin, item: Dict, session: str):

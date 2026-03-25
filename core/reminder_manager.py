@@ -15,7 +15,11 @@ from astrbot.core.platform.astrbot_message import MessageType
 from apscheduler.triggers.cron import CronTrigger
 
 from .utils import (
+    apply_execution_limit,
     describe_origin,
+    extract_plain_text_tokens,
+    parse_add_scene_arguments,
+    parse_edit_scene_tokens,
     execute_linked_command,
     extract_inline_message_structure,
     extract_message_structure_after_token_count,
@@ -50,7 +54,7 @@ class ReminderManager:
 
             parts = event.message_str.strip().split(maxsplit=2)
             if len(parts) < 3:
-                yield "❌ 参数缺失！用法: /添加提醒 <提醒名称> <cron表达式> <消息内容> [图片]"
+                yield "❌ 参数缺失！用法: /添加提醒 <提醒名称> [@好友号|#群号] <cron表达式> <消息内容> [图片]"
                 return
 
             _, name, remaining = parts
@@ -60,14 +64,9 @@ class ReminderManager:
                 yield "❌ 提醒名称不能为纯阿拉伯数字"
                 return
 
-            # 尝试解析是否包含目标会话（@好友号 或 #群号）
-            remaining_parts = remaining.split(maxsplit=1)
-            session_param = None
-            if len(remaining_parts) >= 2 and remaining_parts[0].startswith(('@', '#')):
-                normalized = normalize_session_param_token(remaining_parts[0])
-                if normalized:
-                    session_param = normalized
-                    remaining = remaining_parts[1]
+            parsed_add_args = parse_add_scene_arguments(remaining, parse_recall=True)
+            max_executions = parsed_add_args["max_executions"]
+            session_param = parsed_add_args["session_param"]
 
             target_origin = resolve_session_origin(
                 event.unified_msg_origin,
@@ -79,8 +78,8 @@ class ReminderManager:
                 yield "❌ 无法识别当前平台信息，请使用当前会话模式"
                 return
 
-            # 解析cron和内容
-            cron_expr, content_text = self._parse_cron_and_content(remaining)
+            cron_expr = parsed_add_args["cron_expr"]
+            content_text = parsed_add_args["payload_without_recall"]
 
             if not cron_expr:
                 yield "cron表达式格式错误！需要5段: 分 时 日 月 周"
@@ -111,17 +110,17 @@ class ReminderManager:
                 'self_id': event.get_self_id(),
                 'created_at': datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
             }
+            if max_executions is not None:
+                item['max_executions'] = max_executions
+                if max_executions > 0:
+                    item['executed_count'] = 0
 
             # 处理提醒内容
             used_inline_content = False
             used_reply_content = False
 
-            recall_after_seconds = None
-            recall_time_token = ""
-            recall_after_seconds, cleaned_content = parse_recall_seconds(content_text)
-            if recall_after_seconds is not None:
-                recall_time_token = content_text.lstrip().split(maxsplit=1)[0]
-                content_text = cleaned_content
+            recall_after_seconds = parsed_add_args["recall_after_seconds"]
+            recall_time_token = parsed_add_args["recall_token"]
 
             inline_structure = await extract_inline_message_structure(
                 event.get_messages(),
@@ -206,6 +205,8 @@ class ReminderManager:
                 recall_ok, recall_reason = self.plugin._check_recall_capability(target_origin)
                 if not recall_ok:
                     result_msg += f"\n⚠️ 已设置撤回，但{recall_reason}，将仅发送不撤回。"
+            if max_executions is not None:
+                result_msg += f"\n执行轮次上限: {max_executions if max_executions > 0 else '不限'}"
 
             yield result_msg
 
@@ -227,8 +228,9 @@ class ReminderManager:
                 return
 
             identifier, remaining = parts[1], parts[2] if len(parts) > 2 else ""
-            tokens_all = self._extract_message_tokens(event)
-            session_params, remaining_tokens = self._split_edit_remaining_tokens(tokens_all)
+            tokens_all = extract_plain_text_tokens(event.get_messages())
+            parsed_edit = parse_edit_scene_tokens(tokens_all, header_token_count=2)
+            session_params: List[str] = parsed_edit["session_params"]
 
             # 查找目标提醒（支持名称或序号）
             target_item = None
@@ -254,7 +256,7 @@ class ReminderManager:
                 return
 
             # 如果没有提供剩余参数，显示当前配置
-            if not remaining_tokens and not session_params:
+            if not parsed_edit["tokens_after_session"] and not session_params:
                 current_cron = target_item.get('cron_expr', target_item.get('cron', '未设置'))
                 message_structure = target_item.get('message_structure', [])
                 current_content = "未设置"
@@ -297,12 +299,15 @@ class ReminderManager:
                     session_changed = True
 
             # 解析参数
-            cron_expr, content_text = self._parse_edit_params_from_tokens(remaining_tokens)
+            limit_updated = parsed_edit["limit_updated"]
+            limit_value = parsed_edit["limit_value"]
+            cron_expr = parsed_edit["cron_expr"]
+            content_text = parsed_edit["payload_text"]
             if content_text is not None and not content_text.strip():
                 content_text = None
 
             # 如果都没有提供，显示帮助
-            if not cron_expr and not content_text and not session_params:
+            if not cron_expr and not content_text and not session_params and not limit_updated:
                 yield "❌ 请提供要修改的cron表达式、内容或会话！\n用法: /编辑提醒 <提醒名称或序号> [@好友号|#群号] [cron表达式] [内容]"
                 return
 
@@ -313,6 +318,7 @@ class ReminderManager:
             # 更新内容（仅在 content_text 非空时处理）
             recall_changed = False
             content_changed = False
+            limit_changed = False
             used_inline_content = False
             used_reply_content = False
             if content_text is not None and content_text.strip():
@@ -329,8 +335,11 @@ class ReminderManager:
                     )
                     content_changed = True
 
+            if limit_updated:
+                limit_changed = apply_execution_limit(target_item, limit_value or 0)
+
             # 如果有任何变更，记录编辑时间
-            if session_changed or cron_expr or content_changed or recall_changed:
+            if session_changed or cron_expr or content_changed or recall_changed or limit_changed:
                 target_item['edited_at'] = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
                 target_item['created_by'] = event.get_sender_id()
                 target_item['creator_name'] = event.get_sender_name()
@@ -380,6 +389,19 @@ class ReminderManager:
             elif used_inline_content:
                 msg += "\n内容来源: 指令正文"
             msg += f"\n已影响会话数: {session_count}"
+            if 'max_executions' in target_item:
+                try:
+                    max_executions = int(target_item.get('max_executions', 0) or 0)
+                except Exception:
+                    max_executions = 0
+                if max_executions > 0:
+                    try:
+                        executed_count = int(target_item.get('executed_count', 0) or 0)
+                    except Exception:
+                        executed_count = 0
+                    msg += f"\n执行轮次: {executed_count}/{max_executions}"
+                else:
+                    msg += "\n执行轮次上限: 不限"
 
             if target_item.get('recall_after_seconds', 0) > 0 and sessions:
                 unsupported_sessions = []
@@ -535,6 +557,16 @@ class ReminderManager:
                 recall_after = int(target_item.get('recall_after_seconds', 0) or 0)
                 if recall_after > 0:
                     info_text += f"⏪ 撤回时间: {format_duration_cn(recall_after)}\n"
+                try:
+                    max_executions = int(target_item.get('max_executions', 0) or 0)
+                except Exception:
+                    max_executions = 0
+                if max_executions > 0:
+                    try:
+                        executed_count = int(target_item.get('executed_count', 0) or 0)
+                    except Exception:
+                        executed_count = 0
+                    info_text += f"🔁 执行轮次: {executed_count}/{max_executions}\n"
 
                 info_text += f"\n📝 提醒内容:\n"
 
@@ -627,6 +659,16 @@ class ReminderManager:
                     recall_after = int(item.get('recall_after_seconds', 0) or 0)
                     if recall_after > 0:
                         result += f"   撤回: {format_duration_cn(recall_after)}\n"
+                    try:
+                        max_executions = int(item.get('max_executions', 0) or 0)
+                    except Exception:
+                        max_executions = 0
+                    if max_executions > 0:
+                        try:
+                            executed_count = int(item.get('executed_count', 0) or 0)
+                        except Exception:
+                            executed_count = 0
+                        result += f"   轮次: {executed_count}/{max_executions}\n"
 
                     reminder_name = item['name']
                     if reminder_name in self.plugin.linked_tasks and self.plugin.linked_tasks[reminder_name]:
@@ -717,7 +759,6 @@ class ReminderManager:
                         skipped_sessions.append(session)
                         continue
                     enabled_sessions.append(session)
-                    self.plugin._add_job(target_item, session)
                     success_sessions.append(session)
                     changed = True
 
@@ -730,12 +771,12 @@ class ReminderManager:
                         skipped_sessions.append(session)
                         continue
                     enabled_sessions.remove(session)
-                    self.plugin._remove_job(target_item, session)
                     success_sessions.append(session)
                     changed = True
 
             target_item['enabled_sessions'] = enabled_sessions
             if changed:
+                await self.plugin._reschedule_reminder(target_item)
                 self.plugin._save_reminders()
 
             lines = [f"✅ {action}提醒完成: {name}"]
@@ -865,106 +906,6 @@ class ReminderManager:
         except Exception as e:
             logger.error(f"处理撤回时出错: {e}", exc_info=True)
 
-    def _parse_cron_and_content(self, remaining: str) -> tuple:
-        """解析cron表达式和内容"""
-        remaining_parts = remaining.split(maxsplit=5)
-        if len(remaining_parts) < 5:
-            return None, remaining
-
-        cron_parts = remaining_parts[:5]
-        last_part = cron_parts[4]
-        cleaned_last_part = self._clean_cron_part(last_part)
-
-        if not cleaned_last_part:
-            return None, remaining
-
-        cron_parts[4] = cleaned_last_part
-        cron_expr = ' '.join(cron_parts)
-
-        # 提取内容
-        content_text = ""
-        if len(remaining_parts) > 5:
-            content_text = remaining_parts[5]
-        if len(last_part) > len(cleaned_last_part):
-            content_text = last_part[len(cleaned_last_part):] + (' ' + content_text if content_text else '')
-
-        return cron_expr, content_text.strip()
-
-    def _parse_edit_params_from_tokens(self, tokens: List[str]) -> tuple:
-        """从 token 列表解析 cron 与内容。"""
-        cron_expr = None
-        content_start_idx = 0
-
-        if len(tokens) >= 5:
-            cron_candidate = tokens[:5]
-            try:
-                cleaned_last = self._clean_cron_part(cron_candidate[4])
-                if cleaned_last:
-                    cron_candidate[4] = cleaned_last
-                    test_cron = ' '.join(cron_candidate)
-                    CronTrigger.from_crontab(translate_to_apscheduler_cron(test_cron))
-                    cron_expr = test_cron
-                    content_start_idx = 5
-            except Exception:
-                pass
-
-        if content_start_idx < len(tokens):
-            content_text = ' '.join(tokens[content_start_idx:])
-        else:
-            content_text = None
-
-        return cron_expr, content_text
-
-    def _extract_message_tokens(self, event: AstrMessageEvent) -> List[str]:
-        """从消息链提取文本 token（忽略非文本组件）。"""
-        tokens: List[str] = []
-        for msg_comp in event.get_messages():
-            if isinstance(msg_comp, Plain):
-                text = msg_comp.text or ""
-                if text.strip():
-                    tokens.extend(text.split())
-        return tokens
-
-    def _split_edit_remaining_tokens(self, tokens: List[str]) -> tuple[List[str], List[str]]:
-        """剥离命令头与会话参数后的 token 列表。"""
-        if len(tokens) < 2:
-            return [], []
-
-        remaining_tokens = tokens[2:]
-        session_params: List[str] = []
-        filtered_remaining: List[str] = []
-
-        for part in remaining_tokens:
-            if part.startswith('@') or part.startswith('#'):
-                normalized = normalize_session_param_token(part)
-                if normalized:
-                    session_params.append(normalized)
-                else:
-                    filtered_remaining.append(part)
-            else:
-                filtered_remaining.append(part)
-
-        return session_params, filtered_remaining
-
-    def _clean_cron_part(self, part: str) -> str:
-        """清理cron表达式的部分"""
-        cleaned = ''
-        for i, char in enumerate(part):
-            if char.isalnum() or char in '*-,/':
-                if char.isdigit():
-                    digit_count = 1
-                    for j in range(i + 1, min(i + 10, len(part))):
-                        if part[j].isdigit():
-                            digit_count += 1
-                        else:
-                            break
-                    if digit_count > 3:
-                        break
-                cleaned += char
-            else:
-                break
-        return cleaned
-
     async def _process_reminder_content(self, event, item: Dict, content_text: str, cron_expr: str):
         """处理提醒内容（新增和编辑都使用相同逻辑）"""
         used_inline_content = False
@@ -1034,15 +975,12 @@ class ReminderManager:
 
     def _calc_edit_content_token_offset(self, event: AstrMessageEvent) -> int:
         """计算编辑提醒时内容在文本 token 序列中的起始偏移。"""
-        tokens = self._extract_message_tokens(event)
+        tokens = extract_plain_text_tokens(event.get_messages())
         if len(tokens) < 2:
             return 0
 
-        session_params, remaining_tokens = self._split_edit_remaining_tokens(tokens)
-        cron_expr, _ = self._parse_edit_params_from_tokens(remaining_tokens)
-        if cron_expr:
-            return 2 + len(session_params) + 5
-        return 2 + len(session_params)
+        parsed_edit = parse_edit_scene_tokens(tokens, header_token_count=2)
+        return int(parsed_edit["content_token_offset"])
 
     async def _execute_linked_command(self, linked_task_data: str | Dict, unified_msg_origin: str, item: Dict):
         """执行单个链接任务"""

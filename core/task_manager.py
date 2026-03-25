@@ -9,15 +9,19 @@ from typing import Dict, List, AsyncGenerator
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent
 from astrbot.core.platform.astrbot_message import MessageType
-from astrbot.api.message_components import At, Face, Plain
+from astrbot.api.message_components import At, Face
 from apscheduler.triggers.cron import CronTrigger
 
 from .utils import (
+    apply_execution_limit,
     collect_text_from_message_structure,
     describe_origin,
+    extract_plain_text_tokens,
     extract_inline_message_structure,
     normalize_session_param_token,
     normalize_message_structure,
+    parse_add_scene_arguments,
+    parse_edit_scene_tokens,
     resolve_session_origin,
     translate_to_apscheduler_cron,
     is_user_allowed,
@@ -41,7 +45,7 @@ class TaskManager:
 
             parts = event.message_str.strip().split(maxsplit=2)
             if len(parts) < 3:
-                yield "❌ 参数缺失！用法: /添加任务 <任务名称> <cron表达式> <指令>"
+                yield "❌ 参数缺失！用法: /添加任务 <任务名称> [@好友号|#群号] <cron表达式> <指令>"
                 return
 
             _, name, remaining = parts
@@ -51,14 +55,9 @@ class TaskManager:
                 yield "❌ 任务名称不能为纯阿拉伯数字"
                 return
 
-            # 尝试解析是否包含目标会话（@好友号 或 #群号）
-            remaining_parts = remaining.split(maxsplit=1)
-            session_param = None
-            if len(remaining_parts) >= 2 and remaining_parts[0].startswith(('@', '#')):
-                normalized = normalize_session_param_token(remaining_parts[0])
-                if normalized:
-                    session_param = normalized
-                    remaining = remaining_parts[1]
+            parsed_add_args = parse_add_scene_arguments(remaining)
+            max_executions = parsed_add_args["max_executions"]
+            session_param = parsed_add_args["session_param"]
 
             target_origin = resolve_session_origin(
                 event.unified_msg_origin,
@@ -70,8 +69,8 @@ class TaskManager:
                 yield "❌ 无法识别当前平台信息，请使用当前会话模式"
                 return
 
-            # 解析cron和指令
-            cron_expr, command = self._parse_cron_and_command(remaining)
+            cron_expr = parsed_add_args["cron_expr"]
+            command = parsed_add_args["payload_text"]
 
             if not cron_expr:
                 yield "cron表达式格式错误！需要5段: 分 时 日 月 周"
@@ -102,6 +101,10 @@ class TaskManager:
                 'self_id': event.get_self_id(),
                 'created_at': datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
             }
+            if max_executions is not None:
+                item['max_executions'] = max_executions
+                if max_executions > 0:
+                    item['executed_count'] = 0
 
             # 处理指令内容
             await self._process_command_content(event, item, command, cron_expr)
@@ -115,7 +118,10 @@ class TaskManager:
             # 保存数据
             self.plugin._save_reminders()
 
-            yield f"✅ 任务 '{name}' 添加成功！\nCron: {cron_expr}\n目标: {describe_origin(target_origin)}"
+            result_msg = f"✅ 任务 '{name}' 添加成功！\nCron: {cron_expr}\n目标: {describe_origin(target_origin)}"
+            if max_executions is not None:
+                result_msg += f"\n执行轮次上限: {max_executions if max_executions > 0 else '不限'}"
+            yield result_msg
 
         except Exception as e:
             logger.error(f"添加任务失败: {e}", exc_info=True)
@@ -135,8 +141,9 @@ class TaskManager:
                 return
 
             identifier, remaining = parts[1], parts[2] if len(parts) > 2 else ""
-            tokens_all = self._extract_message_tokens(event)
-            session_params, remaining_tokens = self._split_edit_remaining_tokens(tokens_all)
+            tokens_all = extract_plain_text_tokens(event.get_messages())
+            parsed_edit = parse_edit_scene_tokens(tokens_all, header_token_count=2)
+            session_params: List[str] = parsed_edit["session_params"]
 
             # 查找目标任务（支持名称或序号）
             target_item = None
@@ -162,7 +169,7 @@ class TaskManager:
                 return
 
             # 如果没有提供剩余参数，显示当前配置
-            if not remaining_tokens and not session_params:
+            if not parsed_edit["tokens_after_session"] and not session_params:
                 current_cron = target_item.get('cron_expr', target_item.get('cron', '未设置'))
                 current_command = target_item.get('command', '未设置')
 
@@ -198,12 +205,19 @@ class TaskManager:
                     await self.plugin._reschedule_reminder(target_item)
 
             # 解析参数
-            cron_expr, command = self._parse_edit_params_from_tokens(remaining_tokens)
+            limit_updated = parsed_edit["limit_updated"]
+            limit_value = parsed_edit["limit_value"]
+            cron_expr = parsed_edit["cron_expr"]
+            command = parsed_edit["payload_text"]
 
             # 如果都没有提供，显示帮助
-            if not cron_expr and not command and not session_params:
+            if not cron_expr and not command and not session_params and not limit_updated:
                 yield "❌ 请提供要修改的cron表达式、指令或会话！\n用法: /编辑任务 <任务名称或序号> [@好友号|#群号] [cron表达式] [指令]"
                 return
+
+            limit_changed = False
+            if limit_updated:
+                limit_changed = apply_execution_limit(target_item, limit_value or 0)
 
             # 更新cron表达式
             if cron_expr:
@@ -215,7 +229,7 @@ class TaskManager:
                 await self._process_command_content(event, target_item, command, cron_expr or target_item.get('cron_expr', ''))
 
             # 如果有任何变更，记录编辑时间并更新编辑者信息
-            if session_changed or cron_expr or command:
+            if session_changed or cron_expr or command or limit_changed:
                 target_item['edited_at'] = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
                 target_item['created_by'] = event.get_sender_id()
                 target_item['creator_name'] = event.get_sender_name()
@@ -234,6 +248,19 @@ class TaskManager:
                 f"指令: {target_item.get('command', '')}\n"
                 f"已影响会话数: {session_count}"
             )
+            if 'max_executions' in target_item:
+                try:
+                    max_executions = int(target_item.get('max_executions', 0) or 0)
+                except Exception:
+                    max_executions = 0
+                if max_executions > 0:
+                    try:
+                        executed_count = int(target_item.get('executed_count', 0) or 0)
+                    except Exception:
+                        executed_count = 0
+                    msg += f"\n执行轮次: {executed_count}/{max_executions}"
+                else:
+                    msg += "\n执行轮次上限: 不限"
 
             yield msg
 
@@ -350,6 +377,16 @@ class TaskManager:
                     info_text += "🎯 当前未在任何会话启用\n"
 
                 info_text += f"⏰ 定时规则: {target_item.get('cron', target_item.get('cron_expr', 'N/A'))}\n"
+                try:
+                    max_executions = int(target_item.get('max_executions', 0) or 0)
+                except Exception:
+                    max_executions = 0
+                if max_executions > 0:
+                    try:
+                        executed_count = int(target_item.get('executed_count', 0) or 0)
+                    except Exception:
+                        executed_count = 0
+                    info_text += f"🔁 执行轮次: {executed_count}/{max_executions}\n"
                 # 优先显示编辑时间，如果没有则显示创建时间
                 if target_item.get('edited_at'):
                     info_text += f"📅 最后编辑: {target_item['edited_at']}\n"
@@ -372,6 +409,16 @@ class TaskManager:
                         result += "   已启用会话数: 0\n"
 
                     result += f"   cron: {item.get('cron_expr', item.get('cron', 'N/A'))}\n"
+                    try:
+                        max_executions = int(item.get('max_executions', 0) or 0)
+                    except Exception:
+                        max_executions = 0
+                    if max_executions > 0:
+                        try:
+                            executed_count = int(item.get('executed_count', 0) or 0)
+                        except Exception:
+                            executed_count = 0
+                        result += f"   轮次: {executed_count}/{max_executions}\n"
                     result += f"   指令: {item.get('command', 'N/A')}\n"
                     result += f"   创建时间: {item.get('created_at', 'N/A')}\n\n"
 
@@ -456,7 +503,6 @@ class TaskManager:
                         skipped_sessions.append(session)
                         continue
                     enabled_sessions.append(session)
-                    self.plugin._add_job(target_item, session)
                     success_sessions.append(session)
                     changed = True
                 else:
@@ -464,12 +510,12 @@ class TaskManager:
                         skipped_sessions.append(session)
                         continue
                     enabled_sessions.remove(session)
-                    self.plugin._remove_job(target_item, session)
                     success_sessions.append(session)
                     changed = True
 
             target_item['enabled_sessions'] = enabled_sessions
             if changed:
+                await self.plugin._reschedule_reminder(target_item)
                 self.plugin._save_reminders()
 
             lines = [f"✅ {action}任务完成: {name}"]
@@ -541,106 +587,6 @@ class TaskManager:
         # 派发事件
         self.plugin.context.get_event_queue().put_nowait(event)
         logger.info(f"任务 '{item.get('name')}' 已派发: {command}")
-
-    def _parse_cron_and_command(self, remaining: str) -> tuple:
-        """解析cron表达式和指令"""
-        remaining_parts = remaining.split(maxsplit=5)
-        if len(remaining_parts) < 5:
-            return None, remaining
-
-        cron_parts = remaining_parts[:5]
-        last_part = cron_parts[4]
-        cleaned_last_part = self._clean_cron_part(last_part)
-
-        if not cleaned_last_part:
-            return None, remaining
-
-        cron_parts[4] = cleaned_last_part
-        cron_expr = ' '.join(cron_parts)
-
-        # 提取指令
-        command = ""
-        if len(remaining_parts) > 5:
-            command = remaining_parts[5]
-        if len(last_part) > len(cleaned_last_part):
-            command = last_part[len(cleaned_last_part):] + (' ' + command if command else '')
-
-        return cron_expr, command.strip()
-
-    def _parse_edit_params_from_tokens(self, tokens: List[str]) -> tuple:
-        """从 token 列表解析 cron 与指令。"""
-        cron_expr = None
-        command_start_idx = 0
-
-        if len(tokens) >= 5:
-            cron_candidate = tokens[:5]
-            try:
-                cleaned_last = self._clean_cron_part(cron_candidate[4])
-                if cleaned_last:
-                    cron_candidate[4] = cleaned_last
-                    test_cron = ' '.join(cron_candidate)
-                    CronTrigger.from_crontab(translate_to_apscheduler_cron(test_cron))
-                    cron_expr = test_cron
-                    command_start_idx = 5
-            except Exception:
-                pass
-
-        if command_start_idx < len(tokens):
-            command = ' '.join(tokens[command_start_idx:])
-        else:
-            command = None
-
-        return cron_expr, command
-
-    def _extract_message_tokens(self, event: AstrMessageEvent) -> List[str]:
-        """从消息链提取文本 token（忽略非文本组件）。"""
-        tokens: List[str] = []
-        for msg_comp in event.get_messages():
-            if isinstance(msg_comp, Plain):
-                text = msg_comp.text or ""
-                if text.strip():
-                    tokens.extend(text.split())
-        return tokens
-
-    def _split_edit_remaining_tokens(self, tokens: List[str]) -> tuple[List[str], List[str]]:
-        """剥离命令头与会话参数后的 token 列表。"""
-        if len(tokens) < 2:
-            return [], []
-
-        remaining_tokens = tokens[2:]
-        session_params: List[str] = []
-        filtered_remaining: List[str] = []
-
-        for part in remaining_tokens:
-            if part.startswith('@') or part.startswith('#'):
-                normalized = normalize_session_param_token(part)
-                if normalized:
-                    session_params.append(normalized)
-                else:
-                    filtered_remaining.append(part)
-            else:
-                filtered_remaining.append(part)
-
-        return session_params, filtered_remaining
-
-    def _clean_cron_part(self, part: str) -> str:
-        """清理cron表达式的部分"""
-        cleaned = ''
-        for i, char in enumerate(part):
-            if char.isalnum() or char in '*-,/':
-                if char.isdigit():
-                    digit_count = 1
-                    for j in range(i + 1, min(i + 10, len(part))):
-                        if part[j].isdigit():
-                            digit_count += 1
-                        else:
-                            break
-                    if digit_count > 3:
-                        break
-                cleaned += char
-            else:
-                break
-        return cleaned
 
     async def _process_command_content(self, event, item: Dict, command: str, cron_expr: str):
         """处理指令内容（新增和编辑都使用相同逻辑）"""
