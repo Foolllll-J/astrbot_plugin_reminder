@@ -44,6 +44,21 @@ class ReminderManager:
     def __init__(self, plugin):
         self.plugin = plugin
 
+    def _find_reminder_by_identifier(self, identifier: str):
+        """Resolve a reminder by display index or exact name."""
+        reminder_items = [item for item in self.plugin.reminders if not item.get('is_task', False)]
+
+        if identifier.isdigit():
+            index = int(identifier) - 1
+            if 0 <= index < len(reminder_items):
+                return reminder_items[index]
+            return None
+
+        for item in reminder_items:
+            if item.get('name') == identifier:
+                return item
+        return None
+
     async def add_reminder(self, event: AstrMessageEvent) -> AsyncGenerator[str, None]:
         """添加定时提醒"""
         try:
@@ -696,7 +711,7 @@ class ReminderManager:
             action = "启动" if enable else "停止"
 
             if len(parts) < 2:
-                yield f"❌ 参数缺失！\n用法: /{action}提醒 <提醒名> [@好友号|#群号 ...]"
+                yield f"❌ 参数缺失！\n用法: /{action}提醒 <提醒名称或序号> [@好友号|#群号 ...]"
                 return
 
             name = parts[1]
@@ -708,17 +723,13 @@ class ReminderManager:
                 ]
                 if invalid_params:
                     invalid_str = " ".join(invalid_params)
-                    yield f"❌ 会话参数无效: {invalid_str}\n用法: /{action}提醒 <提醒名> [@好友号|#群号 ...]"
+                    yield f"❌ 会话参数无效: {invalid_str}\n用法: /{action}提醒 <提醒名称或序号> [@好友号|#群号 ...]"
                     return
                 raw_targets = [normalize_session_param_token(p) for p in session_params if normalize_session_param_token(p)]
             else:
                 raw_targets = [None]
 
-            target_item = None
-            for item in self.plugin.reminders:
-                if not item.get('is_task', False) and item.get('name') == name:
-                    target_item = item
-                    break
+            target_item = self._find_reminder_by_identifier(name)
 
             if not target_item:
                 yield f"❌ 未找到名为 '{name}' 的提醒"

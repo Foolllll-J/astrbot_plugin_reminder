@@ -20,9 +20,24 @@ class LinkedTaskManager:
     def __init__(self, plugin):
         self.plugin = plugin
 
+    def _find_reminder_by_identifier(self, identifier: str):
+        """Resolve a reminder by display index or exact name."""
+        reminder_items = [item for item in self.plugin.reminders if not item.get('is_task', False)]
+
+        if identifier.isdigit():
+            index = int(identifier) - 1
+            if 0 <= index < len(reminder_items):
+                return reminder_items[index]
+            return None
+
+        for item in reminder_items:
+            if item.get('name') == identifier:
+                return item
+        return None
+
     async def link_reminder_to_task(self, event: AstrMessageEvent) -> AsyncGenerator[str, None]:
-        """链接提醒到任务，提醒执行后执行指定指令
-        用法: /链接提醒 <提醒名称> <指令> [参数可选]
+        """将指令链接到提醒，提醒执行后自动执行对应指令
+        用法: /链接提醒 <提醒名称或序号> <指令> [参数可选]
         示例: /链接提醒 早安 /签到
         说明: 当提醒「早安」执行后，会自动执行指令「/签到」
         💡 支持为同一个提醒链接多个指令，将按添加顺序依次执行
@@ -38,25 +53,21 @@ class LinkedTaskManager:
             if len(parts) < 3:
                 yield (
                     "格式错误！\n"
-                    "用法: /链接提醒 <提醒名称> <指令> [参数可选]\n"
+                    "用法: /链接提醒 <提醒名称或序号> <指令> [参数可选]\n"
                     "示例: /链接提醒 早安 /签到\n"
                     "说明: 当提醒「早安」执行后，会自动执行指令「/签到」\n"
                     "💡 支持为同一个提醒链接多个指令，将按添加顺序依次执行"
                 )
                 return
 
-            _, reminder_name, command_with_args = parts
+            _, reminder_identifier, command_with_args = parts
 
-            # 验证提醒是否存在
-            reminder_exists = False
-            for item in self.plugin.reminders:
-                if item['name'] == reminder_name and not item.get('is_task', False):
-                    reminder_exists = True
-                    break
-
-            if not reminder_exists:
-                yield f"❌ 未找到名为 '{reminder_name}' 的提醒"
+            reminder_item = self._find_reminder_by_identifier(reminder_identifier)
+            if not reminder_item:
+                yield f"❌ 未找到名为 '{reminder_identifier}' 的提醒"
                 return
+
+            reminder_name = reminder_item['name']
 
             # 验证指令格式
             if not command_with_args:
@@ -110,7 +121,11 @@ class LinkedTaskManager:
 
             # 计算当前链接的任务数量
             task_count = len(self.plugin.linked_tasks[reminder_name])
-            yield f"✅ 已将提醒 '{reminder_name}' 链接到指令: {command_with_args}\n当提醒执行后，将自动执行该指令。\n当前已链接 {task_count} 个指令。"
+            yield (
+                f"✅ 已将指令链接到提醒「{reminder_name}」: {command_with_args}\n"
+                f"当该提醒执行时，将自动执行此指令。\n"
+                f"当前该提醒已链接 {task_count} 个指令。"
+            )
 
         except Exception as e:
             logger.error(f"链接提醒失败: {e}", exc_info=True)
@@ -119,7 +134,7 @@ class LinkedTaskManager:
     async def list_linked_tasks(self, event: AstrMessageEvent) -> AsyncGenerator[str, None]:
         """查看已链接的任务
         用法1: /查看链接 - 显示所有提醒及其链接的任务
-        用法2: /查看链接 <提醒名称> - 显示指定提醒的链接任务详情
+        用法2: /查看链接 <提醒名称或序号> - 显示指定提醒的链接任务详情
         """
         try:
             # 权限检查
@@ -129,25 +144,21 @@ class LinkedTaskManager:
 
             # 解析参数
             parts = event.message_str.strip().split()
-            reminder_name = parts[1] if len(parts) > 1 else None
+            reminder_identifier = parts[1] if len(parts) > 1 else None
+            reminder_name = None
 
             if not self.plugin.linked_tasks or not self.plugin.linked_tasks:
                 yield "当前没有链接的任务"
                 return
 
-            # 如果指定了提醒名称，只显示该提醒的链接任务
-            if reminder_name:
-                # 检查提醒是否存在
-                reminder_exists = False
-                for item in self.plugin.reminders:
-                    if item['name'] == reminder_name and not item.get('is_task', False):
-                        reminder_exists = True
-                        break
-
-                if not reminder_exists:
-                    yield f"❌ 未找到名为 '{reminder_name}' 的提醒"
+            # 如果指定了提醒名称或序号，只显示该提醒的链接任务
+            if reminder_identifier:
+                reminder_item = self._find_reminder_by_identifier(reminder_identifier)
+                if not reminder_item:
+                    yield f"❌ 未找到名为 '{reminder_identifier}' 的提醒"
                     return
 
+                reminder_name = reminder_item['name']
                 if reminder_name not in self.plugin.linked_tasks or not self.plugin.linked_tasks[reminder_name]:
                     yield f"提醒 '{reminder_name}' 没有链接任何任务"
                     return
@@ -207,7 +218,7 @@ class LinkedTaskManager:
                     yield "当前没有链接的任务"
                     return
 
-                result += "💡 使用 /链接提醒 <提醒名称> <指令> 来链接新任务\n"
+                result += "💡 使用 /链接提醒 <提醒名称或序号> <指令> 来链接新任务\n"
                 result += "💡 链接任务会在对应提醒执行后自动执行"
                 yield result
 

@@ -238,8 +238,8 @@ class ReminderPlugin(Star):
 
     @filter.command("链接提醒")
     async def link_reminder_to_task(self, event: AstrMessageEvent):
-        """链接提醒到任务，提醒执行后执行指定指令
-        用法: /链接提醒 <提醒名称> <指令>
+        """将指令链接到提醒，提醒执行后自动执行对应指令
+        用法: /链接提醒 <提醒名称或序号> <指令>
         """
         linked_task_manager = LinkedTaskManager(self)
         async for result in linked_task_manager.link_reminder_to_task(event):
@@ -249,8 +249,8 @@ class ReminderPlugin(Star):
     @filter.command("启动提醒", alias={"启用提醒"})
     async def enable_reminder(self, event: AstrMessageEvent):
         """启动定时提醒
-        用法1: /启动提醒 <提醒名称> - 在当前会话启动该提醒
-        用法2: /启动提醒 <提醒名称> [@好友号|#群号 ...] - 在指定会话启动该提醒
+        用法1: /启动提醒 <提醒名称或序号> - 在当前会话启动该提醒
+        用法2: /启动提醒 <提醒名称或序号> [@好友号|#群号 ...] - 在指定会话启动该提醒
         """
         reminder_manager = ReminderManager(self)
         async for result in reminder_manager.toggle_reminder_session(event, enable=True):
@@ -259,8 +259,8 @@ class ReminderPlugin(Star):
     @filter.command("停止提醒", alias={"终止提醒", "停用提醒"})
     async def disable_reminder(self, event: AstrMessageEvent):
         """停止定时提醒
-        用法1: /停止提醒 <提醒名称> - 在当前会话停止该提醒
-        用法2: /停止提醒 <提醒名称> [@好友号|#群号 ...] - 在指定会话停止该提醒
+        用法1: /停止提醒 <提醒名称或序号> - 在当前会话停止该提醒
+        用法2: /停止提醒 <提醒名称或序号> [@好友号|#群号 ...] - 在指定会话停止该提醒
         """
         reminder_manager = ReminderManager(self)
         async for result in reminder_manager.toggle_reminder_session(event, enable=False):
@@ -269,8 +269,8 @@ class ReminderPlugin(Star):
     @filter.command("启动任务", alias={"启用任务"})
     async def enable_task(self, event: AstrMessageEvent):
         """启动定时任务
-        用法1: /启动任务 <任务名称> - 在当前会话启动该任务
-        用法2: /启动任务 <任务名称> [@好友号|#群号 ...] - 在指定会话启动该任务
+        用法1: /启动任务 <任务名称或序号> - 在当前会话启动该任务
+        用法2: /启动任务 <任务名称或序号> [@好友号|#群号 ...] - 在指定会话启动该任务
         """
         task_manager = TaskManager(self)
         async for result in task_manager.toggle_task_session(event, enable=True):
@@ -279,8 +279,8 @@ class ReminderPlugin(Star):
     @filter.command("停止任务", alias={"终止任务", "停用任务"})
     async def disable_task(self, event: AstrMessageEvent):
         """停止定时任务
-        用法1: /停止任务 <任务名称> - 在当前会话停止该任务
-        用法2: /停止任务 <任务名称> [@好友号|#群号 ...] - 在指定会话停止该任务
+        用法1: /停止任务 <任务名称或序号> - 在当前会话停止该任务
+        用法2: /停止任务 <任务名称或序号> [@好友号|#群号 ...] - 在指定会话停止该任务
         """
         task_manager = TaskManager(self)
         async for result in task_manager.toggle_task_session(event, enable=False):
@@ -288,9 +288,9 @@ class ReminderPlugin(Star):
 
     @filter.command("查看链接")
     async def list_linked_tasks(self, event: AstrMessageEvent):
-        """查看所有链接的任务
-        用法1: /查看链接 - 显示所有提醒及其链接的任务
-        用法2: /查看链接 <提醒名称> - 显示指定提醒的链接任务详情
+        """查看所有已链接的指令
+        用法1: /查看链接 - 显示所有提醒及其已链接指令
+        用法2: /查看链接 <提醒名称或序号> - 显示指定提醒的链接指令详情
         """
         linked_task_manager = LinkedTaskManager(self)
         async for result in linked_task_manager.list_linked_tasks(event):

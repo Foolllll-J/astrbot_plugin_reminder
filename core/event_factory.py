@@ -1,4 +1,4 @@
-import time
+import uuid
 from astrbot.api import logger
 from astrbot.api.star import Context
 from astrbot.core.platform.astr_message_event import AstrMessageEvent
@@ -153,7 +153,7 @@ class EventFactory:
             msg.self_id = ""
             logger.debug("未提供机器人ID，使用空字符串")
 
-        msg.message_id = "command_trigger_" + str(int(time.time()))
+        msg.message_id = f"command_trigger_{uuid.uuid4().hex}"
 
         # 设置发送者信息
         msg.sender = MessageMember(user_id=creator_id, nickname=creator_name or "用户")
