@@ -1735,27 +1735,30 @@ def sync_config_to_reminders_file(plugin):
         created_at = item_cfg.get("created_at", "")
         created_by = item_cfg.get("created_by", "")
         creator_name = item_cfg.get("creator_name", "")
+        is_admin = item_cfg.get("is_admin", True)
+        self_id = item_cfg.get("self_id", "")
         message_structure = tags_to_message_structure(content)
         item = {
             "name": name,
+            "is_task": False,
             "cron_expr": cron,
             "enabled_sessions": sessions,
             "message_structure": message_structure,
+            "created_by": created_by,
+            "creator_name": creator_name,
+            "is_admin": is_admin,
+            "self_id": self_id,
+            "created_at": created_at,
         }
         if max_exec > 0:
             item["max_executions"] = max_exec
+            item["executed_count"] = 0
         else:
             item["max_executions"] = None
         if recall and recall > 0:
             item["recall_after_seconds"] = recall
         if item_id:
             item["id"] = item_id
-        if created_at:
-            item["created_at"] = created_at
-        if created_by:
-            item["created_by"] = created_by
-        if creator_name:
-            item["creator_name"] = creator_name
         plugin.reminders.append(item)
     for item_cfg in tasks_cfg:
         name = item_cfg.get("name", "").strip()
@@ -1769,6 +1772,8 @@ def sync_config_to_reminders_file(plugin):
         created_at = item_cfg.get("created_at", "")
         created_by = item_cfg.get("created_by", "")
         creator_name = item_cfg.get("creator_name", "")
+        is_admin = item_cfg.get("is_admin", True)
+        self_id = item_cfg.get("self_id", "")
         message_structure = [{"type": "text", "content": command}] if command else []
         item = {
             "name": name,
@@ -1777,19 +1782,19 @@ def sync_config_to_reminders_file(plugin):
             "command": command,
             "enabled_sessions": sessions,
             "message_structure": message_structure,
+            "created_by": created_by,
+            "creator_name": creator_name,
+            "is_admin": is_admin,
+            "self_id": self_id,
+            "created_at": created_at,
         }
         if max_exec > 0:
             item["max_executions"] = max_exec
+            item["executed_count"] = 0
         else:
             item["max_executions"] = None
         if item_id:
             item["id"] = item_id
-        if created_at:
-            item["created_at"] = created_at
-        if created_by:
-            item["created_by"] = created_by
-        if creator_name:
-            item["creator_name"] = creator_name
         plugin.reminders.append(item)
     for link_cfg in links_cfg:
         target_name = link_cfg.get("target_reminder_name", "").strip()
@@ -1822,6 +1827,8 @@ def sync_reminders_file_to_config(plugin):
                 "created_at": item.get("created_at", ""),
                 "created_by": item.get("created_by", ""),
                 "creator_name": item.get("creator_name", ""),
+                "is_admin": item.get("is_admin", True),
+                "self_id": item.get("self_id", ""),
             }
             tasks_cfg.append(task_entry)
         else:
@@ -1838,6 +1845,8 @@ def sync_reminders_file_to_config(plugin):
                 "created_at": item.get("created_at", ""),
                 "created_by": item.get("created_by", ""),
                 "creator_name": item.get("creator_name", ""),
+                "is_admin": item.get("is_admin", True),
+                "self_id": item.get("self_id", ""),
             }
             reminders_cfg.append(reminder_entry)
     links_cfg = []
@@ -1884,6 +1893,8 @@ def update_config_from_runtime(plugin):
                     "created_at": item.get("created_at", ""),
                     "created_by": item.get("created_by", ""),
                     "creator_name": item.get("creator_name", ""),
+                    "is_admin": item.get("is_admin", True),
+                    "self_id": item.get("self_id", ""),
                 }
             )
         else:
@@ -1903,6 +1914,8 @@ def update_config_from_runtime(plugin):
                     "created_at": item.get("created_at", ""),
                     "created_by": item.get("created_by", ""),
                     "creator_name": item.get("creator_name", ""),
+                    "is_admin": item.get("is_admin", True),
+                    "self_id": item.get("self_id", ""),
                 }
             )
     links_cfg = []

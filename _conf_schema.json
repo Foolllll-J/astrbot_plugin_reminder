@@ -75,6 +75,18 @@
                         "type": "string",
                         "default": "",
                         "hint": "创建者的昵称"
+                    },
+                    "is_admin": {
+                        "description": "管理员权限",
+                        "type": "bool",
+                        "default": true,
+                        "hint": "系统自动生成"
+                    },
+                    "self_id": {
+                        "description": "机器人ID",
+                        "type": "string",
+                        "default": "",
+                        "hint": "系统自动生成"
                     }
                 }
             }
@@ -143,6 +155,18 @@
                         "type": "string",
                         "default": "",
                         "hint": "创建者的昵称"
+                    },
+                    "is_admin": {
+                        "description": "管理员权限",
+                        "type": "bool",
+                        "default": true,
+                        "hint": "系统自动生成"
+                    },
+                    "self_id": {
+                        "description": "机器人ID",
+                        "type": "string",
+                        "default": "",
+                        "hint": "系统自动生成"
                     }
                 }
             }
