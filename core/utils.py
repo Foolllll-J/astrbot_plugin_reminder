@@ -1727,11 +1727,15 @@ def sync_config_to_reminders_file(plugin):
         name = item_cfg.get("name", "").strip()
         if not name:
             continue
+        item_id = item_cfg.get("id", "").strip()
         cron = item_cfg.get("cron", "").strip()
         content = item_cfg.get("content", "")
         sessions = item_cfg.get("sessions", [])
         max_exec = item_cfg.get("max_executions", 0)
         recall = item_cfg.get("recall_after_seconds", 0)
+        created_at = item_cfg.get("created_at", "")
+        created_by = item_cfg.get("created_by", "")
+        creator_name = item_cfg.get("creator_name", "")
         message_structure = tags_to_message_structure(content)
         item = {
             "name": name,
@@ -1741,17 +1745,29 @@ def sync_config_to_reminders_file(plugin):
             "message_structure": message_structure,
             "max_executions": max_exec if max_exec > 0 else None,
         }
+        if item_id:
+            item["id"] = item_id
         if recall and recall > 0:
             item["recall_after_seconds"] = recall
+        if created_at:
+            item["created_at"] = created_at
+        if created_by:
+            item["created_by"] = created_by
+        if creator_name:
+            item["creator_name"] = creator_name
         plugin.reminders.append(item)
     for item_cfg in tasks_cfg:
         name = item_cfg.get("name", "").strip()
         if not name:
             continue
+        item_id = item_cfg.get("id", "").strip()
         cron = item_cfg.get("cron", "").strip()
         command = item_cfg.get("command", "").strip()
         sessions = item_cfg.get("sessions", [])
         max_exec = item_cfg.get("max_executions", 0)
+        created_at = item_cfg.get("created_at", "")
+        created_by = item_cfg.get("created_by", "")
+        creator_name = item_cfg.get("creator_name", "")
         message_structure = [{"type": "text", "content": command}] if command else []
         item = {
             "name": name,
@@ -1762,6 +1778,14 @@ def sync_config_to_reminders_file(plugin):
             "message_structure": message_structure,
             "max_executions": max_exec if max_exec > 0 else None,
         }
+        if item_id:
+            item["id"] = item_id
+        if created_at:
+            item["created_at"] = created_at
+        if created_by:
+            item["created_by"] = created_by
+        if creator_name:
+            item["creator_name"] = creator_name
         plugin.reminders.append(item)
     for link_cfg in links_cfg:
         target_name = link_cfg.get("target_reminder_name", "").strip()
@@ -1785,23 +1809,31 @@ def sync_reminders_file_to_config(plugin):
         if item.get("is_task", False):
             task_entry = {
                 "__template_key": "task",
+                "id": item.get("id", ""),
                 "name": item.get("name", ""),
                 "cron": item.get("cron_expr", item.get("cron", "")),
                 "command": item.get("command", ""),
                 "sessions": list(item.get("enabled_sessions", [])),
                 "max_executions": int(item.get("max_executions", 0) or 0),
+                "created_at": item.get("created_at", ""),
+                "created_by": item.get("created_by", ""),
+                "creator_name": item.get("creator_name", ""),
             }
             tasks_cfg.append(task_entry)
         else:
             content = message_structure_to_tags(item.get("message_structure", []))
             reminder_entry = {
                 "__template_key": "reminder",
+                "id": item.get("id", ""),
                 "name": item.get("name", ""),
                 "cron": item.get("cron_expr", item.get("cron", "")),
                 "content": content,
                 "sessions": list(item.get("enabled_sessions", [])),
                 "max_executions": int(item.get("max_executions", 0) or 0),
                 "recall_after_seconds": int(item.get("recall_after_seconds", 0) or 0),
+                "created_at": item.get("created_at", ""),
+                "created_by": item.get("created_by", ""),
+                "creator_name": item.get("creator_name", ""),
             }
             reminders_cfg.append(reminder_entry)
     links_cfg = []
@@ -1839,11 +1871,15 @@ def update_config_from_runtime(plugin):
             tasks_cfg.append(
                 {
                     "__template_key": "task",
+                    "id": item.get("id", ""),
                     "name": item.get("name", ""),
                     "cron": item.get("cron_expr", item.get("cron", "")),
                     "command": item.get("command", ""),
                     "sessions": list(item.get("enabled_sessions", [])),
                     "max_executions": int(item.get("max_executions", 0) or 0),
+                    "created_at": item.get("created_at", ""),
+                    "created_by": item.get("created_by", ""),
+                    "creator_name": item.get("creator_name", ""),
                 }
             )
         else:
@@ -1851,6 +1887,7 @@ def update_config_from_runtime(plugin):
             reminders_cfg.append(
                 {
                     "__template_key": "reminder",
+                    "id": item.get("id", ""),
                     "name": item.get("name", ""),
                     "cron": item.get("cron_expr", item.get("cron", "")),
                     "content": content,
@@ -1859,6 +1896,9 @@ def update_config_from_runtime(plugin):
                     "recall_after_seconds": int(
                         item.get("recall_after_seconds", 0) or 0
                     ),
+                    "created_at": item.get("created_at", ""),
+                    "created_by": item.get("created_by", ""),
+                    "creator_name": item.get("creator_name", ""),
                 }
             )
     links_cfg = []

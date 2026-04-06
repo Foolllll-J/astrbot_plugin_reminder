@@ -15,6 +15,12 @@
                 "name": "定时提醒",
                 "hint": "在指定时间向指定会话发送富媒体消息",
                 "items": {
+                    "id": {
+                        "description": "唯一标识ID",
+                        "type": "string",
+                        "default": "",
+                        "hint": "系统自动生成，请勿手动修改"
+                    },
                     "name": {
                         "description": "提醒名称",
                         "type": "string",
@@ -51,6 +57,24 @@
                         "type": "int",
                         "default": 0,
                         "hint": "0 表示不撤回。仅 aiocqhttp 平台支持自动撤回"
+                    },
+                    "created_at": {
+                        "description": "创建时间",
+                        "type": "string",
+                        "default": "",
+                        "hint": "系统自动生成"
+                    },
+                    "created_by": {
+                        "description": "创建者ID",
+                        "type": "string",
+                        "default": "",
+                        "hint": "创建者的用户ID"
+                    },
+                    "creator_name": {
+                        "description": "创建者名称",
+                        "type": "string",
+                        "default": "",
+                        "hint": "创建者的昵称"
                     }
                 }
             }
@@ -65,6 +89,12 @@
                 "name": "定时任务",
                 "hint": "在指定时间向指定会话发送指令",
                 "items": {
+                    "id": {
+                        "description": "唯一标识ID",
+                        "type": "string",
+                        "default": "",
+                        "hint": "系统自动生成，请勿手动修改"
+                    },
                     "name": {
                         "description": "任务名称",
                         "type": "string",
@@ -95,6 +125,24 @@
                         "type": "int",
                         "default": 0,
                         "hint": "0 表示不限次数。达到上限后任务将自动移除"
+                    },
+                    "created_at": {
+                        "description": "创建时间",
+                        "type": "string",
+                        "default": "",
+                        "hint": "系统自动生成"
+                    },
+                    "created_by": {
+                        "description": "创建者ID",
+                        "type": "string",
+                        "default": "",
+                        "hint": "创建者的用户ID"
+                    },
+                    "creator_name": {
+                        "description": "创建者名称",
+                        "type": "string",
+                        "default": "",
+                        "hint": "创建者的昵称"
                     }
                 }
             }
