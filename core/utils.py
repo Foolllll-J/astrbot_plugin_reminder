@@ -1713,7 +1713,6 @@ def _config_has_valid_data(config):
 def sync_config_to_reminders_file(plugin):
     """将 WebUI 配置 (self.config) 同步到 reminders.json。
     仅当 _conf 包含带 __template_key 的有效条目时执行。
-    __template_key 是新版代码才写入的字段，它的存在说明 _conf 是用户通过 WebUI 修改产生的有效数据。
     """
     config = plugin.config or {}
     if not _config_has_valid_data(config):
@@ -1739,16 +1738,18 @@ def sync_config_to_reminders_file(plugin):
         message_structure = tags_to_message_structure(content)
         item = {
             "name": name,
-            "is_task": False,
             "cron_expr": cron,
             "enabled_sessions": sessions,
             "message_structure": message_structure,
-            "max_executions": max_exec if max_exec > 0 else None,
         }
-        if item_id:
-            item["id"] = item_id
+        if max_exec > 0:
+            item["max_executions"] = max_exec
+        else:
+            item["max_executions"] = None
         if recall and recall > 0:
             item["recall_after_seconds"] = recall
+        if item_id:
+            item["id"] = item_id
         if created_at:
             item["created_at"] = created_at
         if created_by:
@@ -1776,8 +1777,11 @@ def sync_config_to_reminders_file(plugin):
             "command": command,
             "enabled_sessions": sessions,
             "message_structure": message_structure,
-            "max_executions": max_exec if max_exec > 0 else None,
         }
+        if max_exec > 0:
+            item["max_executions"] = max_exec
+        else:
+            item["max_executions"] = None
         if item_id:
             item["id"] = item_id
         if created_at:
