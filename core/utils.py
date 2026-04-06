@@ -1726,7 +1726,6 @@ def sync_config_to_reminders_file(plugin):
         name = item_cfg.get("name", "").strip()
         if not name:
             continue
-        item_id = item_cfg.get("id", "").strip()
         cron = item_cfg.get("cron", "").strip()
         content = item_cfg.get("content", "")
         sessions = item_cfg.get("sessions", [])
@@ -1757,14 +1756,11 @@ def sync_config_to_reminders_file(plugin):
             item["max_executions"] = None
         if recall and recall > 0:
             item["recall_after_seconds"] = recall
-        if item_id:
-            item["id"] = item_id
         plugin.reminders.append(item)
     for item_cfg in tasks_cfg:
         name = item_cfg.get("name", "").strip()
         if not name:
             continue
-        item_id = item_cfg.get("id", "").strip()
         cron = item_cfg.get("cron", "").strip()
         command = item_cfg.get("command", "").strip()
         sessions = item_cfg.get("sessions", [])
@@ -1793,8 +1789,6 @@ def sync_config_to_reminders_file(plugin):
             item["executed_count"] = 0
         else:
             item["max_executions"] = None
-        if item_id:
-            item["id"] = item_id
         plugin.reminders.append(item)
     for link_cfg in links_cfg:
         target_name = link_cfg.get("target_reminder_name", "").strip()
@@ -1818,7 +1812,6 @@ def sync_reminders_file_to_config(plugin):
         if item.get("is_task", False):
             task_entry = {
                 "__template_key": "task",
-                "id": item.get("id", ""),
                 "name": item.get("name", ""),
                 "cron": item.get("cron_expr", item.get("cron", "")),
                 "command": item.get("command", ""),
@@ -1835,7 +1828,6 @@ def sync_reminders_file_to_config(plugin):
             content = message_structure_to_tags(item.get("message_structure", []))
             reminder_entry = {
                 "__template_key": "reminder",
-                "id": item.get("id", ""),
                 "name": item.get("name", ""),
                 "cron": item.get("cron_expr", item.get("cron", "")),
                 "content": content,
@@ -1884,7 +1876,6 @@ def update_config_from_runtime(plugin):
             tasks_cfg.append(
                 {
                     "__template_key": "task",
-                    "id": item.get("id", ""),
                     "name": item.get("name", ""),
                     "cron": item.get("cron_expr", item.get("cron", "")),
                     "command": item.get("command", ""),
@@ -1902,7 +1893,6 @@ def update_config_from_runtime(plugin):
             reminders_cfg.append(
                 {
                     "__template_key": "reminder",
-                    "id": item.get("id", ""),
                     "name": item.get("name", ""),
                     "cron": item.get("cron_expr", item.get("cron", "")),
                     "content": content,

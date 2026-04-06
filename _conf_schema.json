@@ -15,12 +15,6 @@
                 "name": "定时提醒",
                 "hint": "在指定时间向指定会话发送富媒体消息",
                 "items": {
-                    "id": {
-                        "description": "唯一标识ID",
-                        "type": "string",
-                        "default": "",
-                        "hint": "系统自动生成，请勿手动修改"
-                    },
                     "name": {
                         "description": "提醒名称",
                         "type": "string",
@@ -101,12 +95,6 @@
                 "name": "定时任务",
                 "hint": "在指定时间向指定会话发送指令",
                 "items": {
-                    "id": {
-                        "description": "唯一标识ID",
-                        "type": "string",
-                        "default": "",
-                        "hint": "系统自动生成，请勿手动修改"
-                    },
                     "name": {
                         "description": "任务名称",
                         "type": "string",
