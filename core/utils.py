@@ -47,7 +47,9 @@ def parse_recall_seconds(content_text: str) -> tuple[Optional[int], str]:
         return None, ""
 
     stripped = content_text.lstrip()
-    match_short = re.match(r"^\[r((?:\d+[dhms]){1,6})\](?:\s+|$)", stripped, re.IGNORECASE)
+    match_short = re.match(
+        r"^\[r((?:\d+[dhms]){1,6})\](?:\s+|$)", stripped, re.IGNORECASE
+    )
     if match_short:
         duration_expr = match_short.group(1).lower()
         duration_parts = re.findall(r"(\d+)([dhms])", duration_expr)
@@ -76,7 +78,9 @@ def parse_execution_limit_token(token: str) -> Optional[int]:
     return None
 
 
-def extract_execution_limit_from_tokens(tokens: List[str]) -> tuple[bool, Optional[int], List[str]]:
+def extract_execution_limit_from_tokens(
+    tokens: List[str],
+) -> tuple[bool, Optional[int], List[str]]:
     """从 token 列表开头提取执行轮次参数。"""
     if not tokens:
         return False, None, tokens
@@ -118,7 +122,9 @@ def clean_cron_part(part: str) -> str:
     return cleaned
 
 
-def parse_cron_payload_from_tokens(tokens: List[str]) -> tuple[Optional[str], Optional[str]]:
+def parse_cron_payload_from_tokens(
+    tokens: List[str],
+) -> tuple[Optional[str], Optional[str]]:
     """从 token 列表开头解析可选 cron 与其后的文本载荷。"""
     cron_expr, consumed_count, attached_payload = parse_cron_from_token_head(tokens)
     if not cron_expr:
@@ -128,7 +134,11 @@ def parse_cron_payload_from_tokens(tokens: List[str]) -> tuple[Optional[str], Op
     payload_tokens = tokens[consumed_count:]
     payload_text = " ".join(payload_tokens).strip()
     if attached_payload:
-        payload_text = f"{attached_payload} {payload_text}".strip() if payload_text else attached_payload
+        payload_text = (
+            f"{attached_payload} {payload_text}".strip()
+            if payload_text
+            else attached_payload
+        )
     return cron_expr, (payload_text if payload_text else None)
 
 
@@ -148,7 +158,11 @@ def parse_cron_from_token_head(tokens: List[str]) -> tuple[Optional[str], int, s
         test_cron = " ".join(cron_candidate)
         CronTrigger.from_crontab(translate_to_apscheduler_cron(test_cron))
 
-        attached_payload = last_part[len(cleaned_last) :].strip() if len(last_part) > len(cleaned_last) else ""
+        attached_payload = (
+            last_part[len(cleaned_last) :].strip()
+            if len(last_part) > len(cleaned_last)
+            else ""
+        )
         return test_cron, 5, attached_payload
     except Exception:
         return None, 0, ""
@@ -195,12 +209,16 @@ def _consume_leading_scene_options(
     remaining_tokens = tokens[idx:]
     if consumed_session_indexes:
         session_index_set = set(consumed_session_indexes)
-        tokens_without_session = [token for i, token in enumerate(tokens) if i not in session_index_set]
+        tokens_without_session = [
+            token for i, token in enumerate(tokens) if i not in session_index_set
+        ]
     else:
         tokens_without_session = list(tokens)
 
     if limit_token_index is not None:
-        tokens_without_limit = [token for i, token in enumerate(tokens) if i != limit_token_index]
+        tokens_without_limit = [
+            token for i, token in enumerate(tokens) if i != limit_token_index
+        ]
     else:
         tokens_without_limit = list(tokens)
 
@@ -215,7 +233,9 @@ def _consume_leading_scene_options(
     }
 
 
-def parse_edit_scene_tokens(tokens_all: List[str], header_token_count: int = 2) -> Dict[str, Any]:
+def parse_edit_scene_tokens(
+    tokens_all: List[str], header_token_count: int = 2
+) -> Dict[str, Any]:
     """统一解析编辑场景 token。
 
     返回:
@@ -230,8 +250,12 @@ def parse_edit_scene_tokens(tokens_all: List[str], header_token_count: int = 2) 
     if header_token_count < 0:
         header_token_count = 0
 
-    tokens_after_header = tokens_all[header_token_count:] if len(tokens_all) > header_token_count else []
-    option_parse = _consume_leading_scene_options(tokens_after_header, collect_multiple_sessions=True)
+    tokens_after_header = (
+        tokens_all[header_token_count:] if len(tokens_all) > header_token_count else []
+    )
+    option_parse = _consume_leading_scene_options(
+        tokens_after_header, collect_multiple_sessions=True
+    )
     session_params: List[str] = option_parse["sessions"]
     limit_updated = bool(option_parse["limit_updated"])
     limit_value = option_parse["max_executions"]
@@ -239,11 +263,17 @@ def parse_edit_scene_tokens(tokens_all: List[str], header_token_count: int = 2) 
     tokens_after_session = option_parse["tokens_without_session"]
 
     tokens_for_cron = option_parse["remaining_tokens"]
-    cron_expr, cron_consumed, attached_payload = parse_cron_from_token_head(tokens_for_cron)
+    cron_expr, cron_consumed, attached_payload = parse_cron_from_token_head(
+        tokens_for_cron
+    )
     payload_tokens = tokens_for_cron[cron_consumed:] if cron_expr else tokens_for_cron
     payload_text = " ".join(payload_tokens).strip() if payload_tokens else None
     if attached_payload:
-        payload_text = f"{attached_payload} {payload_text}".strip() if payload_text else attached_payload
+        payload_text = (
+            f"{attached_payload} {payload_text}".strip()
+            if payload_text
+            else attached_payload
+        )
 
     content_token_offset = header_token_count + int(option_parse["consumed_count"])
     if cron_expr:
@@ -300,7 +330,9 @@ def apply_execution_limit(item: Dict, limit_value: int) -> bool:
     return changed
 
 
-def parse_add_scene_arguments(remaining: str, *, parse_recall: bool = False) -> Dict[str, Any]:
+def parse_add_scene_arguments(
+    remaining: str, *, parse_recall: bool = False
+) -> Dict[str, Any]:
     """统一解析“添加场景”参数。
 
     统一处理：
@@ -311,17 +343,25 @@ def parse_add_scene_arguments(remaining: str, *, parse_recall: bool = False) -> 
     - 提醒撤回参数（可选，`parse_recall=True` 时处理）
     """
     tokens = (remaining or "").strip().split()
-    option_parse = _consume_leading_scene_options(tokens, collect_multiple_sessions=False)
+    option_parse = _consume_leading_scene_options(
+        tokens, collect_multiple_sessions=False
+    )
     max_executions = option_parse["max_executions"]
     session_param = option_parse["sessions"][0] if option_parse["sessions"] else None
 
     # 添加场景下，cron 必须在参数末尾；cron 后所有内容都视为正文，不再继续解析参数。
     tokens_after_options = option_parse["remaining_tokens"]
-    cron_expr, cron_consumed, attached_payload = parse_cron_from_token_head(tokens_after_options)
+    cron_expr, cron_consumed, attached_payload = parse_cron_from_token_head(
+        tokens_after_options
+    )
     payload_tokens = tokens_after_options[cron_consumed:] if cron_expr else []
     payload_text = " ".join(payload_tokens).strip() if payload_tokens else ""
     if attached_payload:
-        payload_text = f"{attached_payload} {payload_text}".strip() if payload_text else attached_payload
+        payload_text = (
+            f"{attached_payload} {payload_text}".strip()
+            if payload_text
+            else attached_payload
+        )
 
     recall_after_seconds: Optional[int] = None
     recall_token = ""
@@ -367,7 +407,9 @@ def format_duration_cn(seconds: int) -> str:
     return "".join(parts) if parts else "0秒"
 
 
-def normalize_message_structure(message_structure: List[Dict], recall_text: str = "") -> List[Dict]:
+def normalize_message_structure(
+    message_structure: List[Dict], recall_text: str = ""
+) -> List[Dict]:
     """将文本中的 At 标记转成消息组件，并移除已解析的撤回时间文本。"""
     normalized: List[Dict] = []
     recall_stripped = False
@@ -462,7 +504,9 @@ async def extract_inline_message_structure(
                 cron_found = True
 
                 if content.strip():
-                    message_structure.append({"type": "text", "content": content.lstrip()})
+                    message_structure.append(
+                        {"type": "text", "content": content.lstrip()}
+                    )
             elif cron_found and msg_comp.text.strip():
                 message_structure.append({"type": "text", "content": msg_comp.text})
         elif not cron_found:
@@ -497,7 +541,7 @@ async def extract_message_structure_after_prefix(
             text = msg_comp.text or ""
             if remaining_prefix:
                 if text.startswith(remaining_prefix):
-                    text = text[len(remaining_prefix):]
+                    text = text[len(remaining_prefix) :]
                     remaining_prefix = ""
                 else:
                     max_len = min(len(text), len(remaining_prefix))
@@ -598,7 +642,9 @@ async def extract_message_structure_after_token_count(
     return message_structure
 
 
-def summarize_message_structure(message_structure: List[Dict[str, Any]]) -> Dict[str, int]:
+def summarize_message_structure(
+    message_structure: List[Dict[str, Any]],
+) -> Dict[str, int]:
     """统计各类消息组件数量。"""
     summary = {
         "text": 0,
@@ -639,7 +685,9 @@ def extract_message_id(send_result: Any) -> Optional[int | str]:
     return None
 
 
-def build_job_id(item_id: str, session: str | None = None, is_task: bool | None = None) -> str:
+def build_job_id(
+    item_id: str, session: str | None = None, is_task: bool | None = None
+) -> str:
     """构建调度任务 ID。
 
     新格式（单任务单 job）:
@@ -666,12 +714,18 @@ def build_legacy_session_job_ids(item: Dict) -> set[str]:
     """收集可能存在的旧版会话级 job id，用于清理兼容。"""
     job_ids: set[str] = set()
     for session in item.get("enabled_sessions", []) or []:
-        job_ids.add(build_job_id(item.get("name", ""), session, is_task=item.get("is_task", False)))
+        job_ids.add(
+            build_job_id(
+                item.get("name", ""), session, is_task=item.get("is_task", False)
+            )
+        )
         job_ids.add(build_job_id(item.get("name", ""), session, is_task=None))
     return job_ids
 
 
-def resolve_session_origin(current_origin: str, is_group_message: bool, session_param: str | None) -> str | None:
+def resolve_session_origin(
+    current_origin: str, is_group_message: bool, session_param: str | None
+) -> str | None:
     """解析目标会话：@好友号为私聊，#群号为群聊，不传则使用当前会话。"""
     if session_param and session_param.startswith("@"):
         friend_id = session_param[1:]
@@ -689,7 +743,11 @@ def resolve_session_origin(current_origin: str, is_group_message: bool, session_
 
     if is_group_message and ":" in current_origin:
         parts = current_origin.split(":", 1)
-        if len(parts) == 2 and "GroupMessage" not in current_origin and "FriendMessage" not in current_origin:
+        if (
+            len(parts) == 2
+            and "GroupMessage" not in current_origin
+            and "FriendMessage" not in current_origin
+        ):
             return f"{parts[0]}:GroupMessage:{parts[1]}"
 
     return current_origin
@@ -744,11 +802,15 @@ def extract_reply_message_id(event: Any) -> Optional[str]:
     """从当前消息中提取被引用消息的 message_id。"""
     try:
         message_obj = getattr(event, "message_obj", None)
-        segments = getattr(message_obj, "message", None) if message_obj is not None else None
+        segments = (
+            getattr(message_obj, "message", None) if message_obj is not None else None
+        )
         if isinstance(segments, list):
             for seg in segments:
                 if seg.__class__.__name__ == "Reply":
-                    seg_id = str(getattr(seg, "id", "") or getattr(seg, "message_id", "") or "").strip()
+                    seg_id = str(
+                        getattr(seg, "id", "") or getattr(seg, "message_id", "") or ""
+                    ).strip()
                     if seg_id:
                         return seg_id
     except Exception:
@@ -756,13 +818,24 @@ def extract_reply_message_id(event: Any) -> Optional[str]:
 
     try:
         message_obj = getattr(event, "message_obj", None)
-        raw_message = getattr(message_obj, "raw_message", None) if message_obj is not None else None
-        raw_segments = raw_message.get("message") if isinstance(raw_message, dict) else None
+        raw_message = (
+            getattr(message_obj, "raw_message", None)
+            if message_obj is not None
+            else None
+        )
+        raw_segments = (
+            raw_message.get("message") if isinstance(raw_message, dict) else None
+        )
         if isinstance(raw_segments, list):
             for seg in raw_segments:
-                if isinstance(seg, dict) and str(seg.get("type", "")).lower() == "reply":
+                if (
+                    isinstance(seg, dict)
+                    and str(seg.get("type", "")).lower() == "reply"
+                ):
                     data = seg.get("data", {}) or {}
-                    seg_id = str(data.get("id", "") or data.get("message_id", "") or "").strip()
+                    seg_id = str(
+                        data.get("id", "") or data.get("message_id", "") or ""
+                    ).strip()
                     if seg_id:
                         return seg_id
     except Exception:
@@ -806,13 +879,17 @@ async def build_message_structure_from_onebot_segments(
         elif seg_type == "image":
             source = str(data.get("url", "") or data.get("file", "") or "").strip()
             if source:
-                media_item = await save_media(Image(file=source, url=data.get("url", "")), "image")
+                media_item = await save_media(
+                    Image(file=source, url=data.get("url", "")), "image"
+                )
                 if media_item:
                     message_structure.append(media_item)
         elif seg_type == "record":
             source = str(data.get("url", "") or data.get("file", "") or "").strip()
             if source:
-                media_item = await save_media(Record(file=source, url=data.get("url", "")), "record")
+                media_item = await save_media(
+                    Record(file=source, url=data.get("url", "")), "record"
+                )
                 if media_item:
                     message_structure.append(media_item)
         elif seg_type == "video":
@@ -846,19 +923,27 @@ async def fetch_reply_message_structure(
         return []
 
     try:
-        original_msg = await api.call_action("get_msg", message_id=int(reply_message_id))
+        original_msg = await api.call_action(
+            "get_msg", message_id=int(reply_message_id)
+        )
     except Exception as exc:
         logger.warning(f"获取引用消息失败: message_id={reply_message_id}, error={exc}")
         return []
 
-    message_segments = original_msg.get("message") if isinstance(original_msg, dict) else None
+    message_segments = (
+        original_msg.get("message") if isinstance(original_msg, dict) else None
+    )
     if not isinstance(message_segments, list):
         return []
 
-    return await build_message_structure_from_onebot_segments(message_segments, save_media)
+    return await build_message_structure_from_onebot_segments(
+        message_segments, save_media
+    )
 
 
-def build_component_from_item(msg_item: Dict[str, Any], data_dir: str, logger: Any) -> Optional[Any]:
+def build_component_from_item(
+    msg_item: Dict[str, Any], data_dir: str, logger: Any
+) -> Optional[Any]:
     """从持久化的 message_structure 还原单个消息组件。"""
     item_type = msg_item.get("type")
     if item_type == "text":
@@ -890,7 +975,9 @@ def build_component_from_item(msg_item: Dict[str, Any], data_dir: str, logger: A
     return None
 
 
-def split_message_structure(message_structure: List[Dict[str, Any]]) -> List[List[Dict[str, Any]]]:
+def split_message_structure(
+    message_structure: List[Dict[str, Any]],
+) -> List[List[Dict[str, Any]]]:
     """按平台限制拆分消息：video 和 record 必须单独发送。"""
     chunks: List[List[Dict[str, Any]]] = []
     current_chunk: List[Dict[str, Any]] = []
@@ -990,25 +1077,25 @@ def load_reminders(plugin):
         if not os.path.exists(plugin.data_file):
             return
 
-        with open(plugin.data_file, 'r', encoding='utf-8') as f:
+        with open(plugin.data_file, "r", encoding="utf-8") as f:
             data = json.load(f)
 
         if isinstance(data, list):
             raw_reminders = data
             raw_linked_tasks = {}
         else:
-            raw_reminders = data.get('reminders', [])
-            raw_linked_tasks = data.get('linked_tasks', {})
+            raw_reminders = data.get("reminders", [])
+            raw_linked_tasks = data.get("linked_tasks", {})
 
         normalized_linked_tasks: Dict[str, List[Dict]] = {}
         for reminder_name, task_data in raw_linked_tasks.items():
             commands_list = []
             if isinstance(task_data, str):
-                commands_list.append({'command': task_data, 'message_structure': []})
+                commands_list.append({"command": task_data, "message_structure": []})
             elif isinstance(task_data, list):
                 for cmd in task_data:
                     if isinstance(cmd, str):
-                        commands_list.append({'command': cmd, 'message_structure': []})
+                        commands_list.append({"command": cmd, "message_structure": []})
                     elif isinstance(cmd, dict):
                         commands_list.append(cmd)
             normalized_linked_tasks[reminder_name] = commands_list
@@ -1018,21 +1105,21 @@ def load_reminders(plugin):
         need_resave = False
 
         for item in raw_reminders:
-            orig_name = str(item.get('name', '')).strip()
+            orig_name = str(item.get("name", "")).strip()
             if not orig_name:
                 continue
 
             if re.fullmatch(r"\d+", orig_name):
-                prefix = "任务" if item.get('is_task', False) else "提醒"
+                prefix = "任务" if item.get("is_task", False) else "提醒"
                 base_name = f"{prefix}{orig_name}"
                 new_name = base_name
                 suffix = 1
                 while new_name in existing_names:
                     new_name = f"{base_name}_{suffix}"
                     suffix += 1
-                item['name'] = new_name
+                item["name"] = new_name
                 existing_names.add(new_name)
-                if not item.get('is_task', False):
+                if not item.get("is_task", False):
                     name_map[orig_name] = new_name
                 need_resave = True
             else:
@@ -1043,36 +1130,42 @@ def load_reminders(plugin):
                     while new_name in existing_names:
                         new_name = f"{base_name}_{suffix}"
                         suffix += 1
-                    item['name'] = new_name
-                    if not item.get('is_task', False):
+                    item["name"] = new_name
+                    if not item.get("is_task", False):
                         name_map[orig_name] = new_name
                     existing_names.add(new_name)
                     need_resave = True
                 else:
                     existing_names.add(orig_name)
 
-            if 'enabled_sessions' not in item:
-                unified = item.get('unified_msg_origin')
+            if "enabled_sessions" not in item:
+                unified = item.get("unified_msg_origin")
                 if unified:
-                    item['enabled_sessions'] = [unified]
+                    item["enabled_sessions"] = [unified]
                 else:
-                    item['enabled_sessions'] = []
+                    item["enabled_sessions"] = []
                 need_resave = True
 
-            if 'unified_msg_origin' in item:
-                item.pop('unified_msg_origin', None)
+            if "unified_msg_origin" in item:
+                item.pop("unified_msg_origin", None)
                 need_resave = True
 
-            if isinstance(item.get('message_structure'), list):
-                normalized_message_structure = normalize_message_structure(item['message_structure'])
-                if normalized_message_structure != item['message_structure']:
-                    item['message_structure'] = normalized_message_structure
+            if isinstance(item.get("message_structure"), list):
+                normalized_message_structure = normalize_message_structure(
+                    item["message_structure"]
+                )
+                if normalized_message_structure != item["message_structure"]:
+                    item["message_structure"] = normalized_message_structure
                     need_resave = True
 
-                if item.get('is_task', False):
-                    normalized_command = collect_text_from_message_structure(item['message_structure']).strip()
-                    if normalized_command and normalized_command != item.get('command', ''):
-                        item['command'] = normalized_command
+                if item.get("is_task", False):
+                    normalized_command = collect_text_from_message_structure(
+                        item["message_structure"]
+                    ).strip()
+                    if normalized_command and normalized_command != item.get(
+                        "command", ""
+                    ):
+                        item["command"] = normalized_command
                         need_resave = True
 
             raw_max_executions = item.get("max_executions")
@@ -1116,7 +1209,9 @@ def load_reminders(plugin):
             normalized_commands: List[Dict] = []
             for cmd in commands:
                 if isinstance(cmd, str):
-                    normalized_commands.append({'command': cmd, 'message_structure': []})
+                    normalized_commands.append(
+                        {"command": cmd, "message_structure": []}
+                    )
                     need_resave = True
                     continue
 
@@ -1124,15 +1219,15 @@ def load_reminders(plugin):
                     need_resave = True
                     continue
 
-                cmd_struct = cmd.get('message_structure')
+                cmd_struct = cmd.get("message_structure")
                 if not isinstance(cmd_struct, list):
                     cmd_struct = []
-                    cmd['message_structure'] = cmd_struct
+                    cmd["message_structure"] = cmd_struct
                     need_resave = True
 
                 normalized_cmd_struct = normalize_message_structure(cmd_struct)
                 if normalized_cmd_struct != cmd_struct:
-                    cmd['message_structure'] = normalized_cmd_struct
+                    cmd["message_structure"] = normalized_cmd_struct
                     need_resave = True
 
                 normalized_commands.append(cmd)
@@ -1155,12 +1250,9 @@ def load_reminders(plugin):
 def save_reminders(plugin):
     """保存提醒数据到文件"""
     try:
-        data = {
-            'reminders': plugin.reminders,
-            'linked_tasks': plugin.linked_tasks
-        }
+        data = {"reminders": plugin.reminders, "linked_tasks": plugin.linked_tasks}
 
-        with open(plugin.data_file, 'w', encoding='utf-8') as f:
+        with open(plugin.data_file, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
 
         logger.debug("数据已保存")
@@ -1178,10 +1270,10 @@ async def restore_reminders(plugin):
         for item in plugin.reminders:
             try:
                 # 兼容旧数据结构
-                if 'cron_expr' not in item and 'cron' in item:
-                    item['cron_expr'] = item['cron']
-                if 'sessions' in item and 'enabled_sessions' not in item:
-                    item['enabled_sessions'] = item['sessions']
+                if "cron_expr" not in item and "cron" in item:
+                    item["cron_expr"] = item["cron"]
+                if "sessions" in item and "enabled_sessions" not in item:
+                    item["enabled_sessions"] = item["sessions"]
 
                 # 恢复调度
                 await schedule_reminder(plugin, item)
@@ -1225,10 +1317,9 @@ def _find_item_in_runtime(plugin, item: Dict) -> tuple[Optional[int], Optional[D
     for idx, existing in enumerate(plugin.reminders):
         if existing is item:
             return idx, existing
-        if (
-            existing.get("name") == item.get("name")
-            and bool(existing.get("is_task", False)) == bool(item.get("is_task", False))
-        ):
+        if existing.get("name") == item.get("name") and bool(
+            existing.get("is_task", False)
+        ) == bool(item.get("is_task", False)):
             return idx, existing
     return None, None
 
@@ -1256,7 +1347,11 @@ def add_job(plugin, item: Dict, session: str | None = None):
         cleanup_ids = {job_id, legacy_job_id}
         cleanup_ids.update(build_legacy_session_job_ids(item))
         if session:
-            cleanup_ids.add(build_job_id(item.get("name", ""), session, is_task=item.get("is_task", False)))
+            cleanup_ids.add(
+                build_job_id(
+                    item.get("name", ""), session, is_task=item.get("is_task", False)
+                )
+            )
             cleanup_ids.add(build_job_id(item.get("name", ""), session, is_task=None))
 
         for jid in cleanup_ids:
@@ -1305,10 +1400,9 @@ def remove_all_jobs_for_item(plugin, item: Dict):
                 mapped_item = mapped[0] if isinstance(mapped, tuple) else mapped
                 if not isinstance(mapped_item, dict):
                     continue
-                if (
-                    mapped_item.get("name") == item.get("name")
-                    and bool(mapped_item.get("is_task", False)) == bool(item.get("is_task", False))
-                ):
+                if mapped_item.get("name") == item.get("name") and bool(
+                    mapped_item.get("is_task", False)
+                ) == bool(item.get("is_task", False)):
                     job_ids.add(jid)
 
         for jid in job_ids:
@@ -1360,9 +1454,9 @@ def get_platform_adapter_name(plugin, platform_id: str) -> str:
         return platform_id
 
     try:
-        if hasattr(platform_inst, 'meta'):
+        if hasattr(platform_inst, "meta"):
             meta = platform_inst.meta()
-            if hasattr(meta, 'name') and meta.name:
+            if hasattr(meta, "name") and meta.name:
                 return str(meta.name)
     except Exception:
         pass
@@ -1377,13 +1471,13 @@ def get_platform_api_client(plugin, platform_id: str):
         if not platform_inst:
             return None
 
-        if hasattr(platform_inst, 'bot') and hasattr(platform_inst.bot, 'api'):
+        if hasattr(platform_inst, "bot") and hasattr(platform_inst.bot, "api"):
             return platform_inst.bot.api
-        if hasattr(platform_inst, 'client') and hasattr(platform_inst.client, 'api'):
+        if hasattr(platform_inst, "client") and hasattr(platform_inst.client, "api"):
             return platform_inst.client.api
-        if hasattr(platform_inst, 'get_client'):
+        if hasattr(platform_inst, "get_client"):
             client = platform_inst.get_client()
-            if hasattr(client, 'api'):
+            if hasattr(client, "api"):
                 return client.api
         return None
     except Exception as e:
@@ -1394,12 +1488,12 @@ def get_platform_api_client(plugin, platform_id: str):
 def check_recall_capability(plugin, unified_msg_origin: str) -> tuple[bool, str]:
     """检查平台是否支持撤回"""
     try:
-        if not unified_msg_origin or ':' not in unified_msg_origin:
+        if not unified_msg_origin or ":" not in unified_msg_origin:
             return False, "无法识别目标会话的平台信息"
 
-        platform_id = unified_msg_origin.split(':', 1)[0]
+        platform_id = unified_msg_origin.split(":", 1)[0]
         adapter_name = get_platform_adapter_name(plugin, platform_id)
-        if adapter_name != 'aiocqhttp':
+        if adapter_name != "aiocqhttp":
             return False, f"平台 {platform_id}({adapter_name}) 暂不支持自动撤回"
 
         api = get_platform_api_client(plugin, platform_id)
@@ -1420,15 +1514,15 @@ async def send_aiocqhttp_with_message_id(
     if not unified_msg_origin:
         unified_msg_origin = item.get("unified_msg_origin") or item.get("session")
 
-    if not unified_msg_origin or ':' not in unified_msg_origin:
+    if not unified_msg_origin or ":" not in unified_msg_origin:
         return None
 
-    parts = unified_msg_origin.split(':', 2)
+    parts = unified_msg_origin.split(":", 2)
     if len(parts) < 3:
         return None
 
     platform_id, msg_type, target_id = parts[0], parts[1], parts[2]
-    if get_platform_adapter_name(plugin, platform_id) != 'aiocqhttp':
+    if get_platform_adapter_name(plugin, platform_id) != "aiocqhttp":
         return None
 
     api = get_platform_api_client(plugin, platform_id)
@@ -1436,55 +1530,63 @@ async def send_aiocqhttp_with_message_id(
         return None
 
     segments = []
-    for msg_item in item.get('message_structure', []):
-        mtype = msg_item.get('type')
-        if mtype == 'text':
-            segments.append({'type': 'text', 'data': {'text': msg_item.get('content', '')}})
-        elif mtype == 'at':
-            segments.append({'type': 'at', 'data': {'qq': str(msg_item.get('qq', ''))}})
-        elif mtype == 'atall':
-            segments.append({'type': 'at', 'data': {'qq': 'all'}})
-        elif mtype == 'face':
-            segments.append({'type': 'face', 'data': {'id': msg_item.get('id')}})
-        elif mtype == 'image':
-            full_path = os.path.join(plugin.data_dir, msg_item.get('path', ''))
+    for msg_item in item.get("message_structure", []):
+        mtype = msg_item.get("type")
+        if mtype == "text":
+            segments.append(
+                {"type": "text", "data": {"text": msg_item.get("content", "")}}
+            )
+        elif mtype == "at":
+            segments.append({"type": "at", "data": {"qq": str(msg_item.get("qq", ""))}})
+        elif mtype == "atall":
+            segments.append({"type": "at", "data": {"qq": "all"}})
+        elif mtype == "face":
+            segments.append({"type": "face", "data": {"id": msg_item.get("id")}})
+        elif mtype == "image":
+            full_path = os.path.join(plugin.data_dir, msg_item.get("path", ""))
             if os.path.exists(full_path):
                 try:
                     file_uri = Path(full_path).resolve().as_uri()
                 except Exception:
                     file_uri = full_path
-                segments.append({'type': 'image', 'data': {'file': file_uri}})
-        elif mtype == 'record':
-            full_path = os.path.join(plugin.data_dir, msg_item.get('path', ''))
+                segments.append({"type": "image", "data": {"file": file_uri}})
+        elif mtype == "record":
+            full_path = os.path.join(plugin.data_dir, msg_item.get("path", ""))
             if os.path.exists(full_path):
                 try:
                     file_uri = Path(full_path).resolve().as_uri()
                 except Exception:
                     file_uri = full_path
-                segments.append({'type': 'record', 'data': {'file': file_uri}})
-        elif mtype == 'video':
-            full_path = os.path.join(plugin.data_dir, msg_item.get('path', ''))
+                segments.append({"type": "record", "data": {"file": file_uri}})
+        elif mtype == "video":
+            full_path = os.path.join(plugin.data_dir, msg_item.get("path", ""))
             if os.path.exists(full_path):
                 try:
                     file_uri = Path(full_path).resolve().as_uri()
                 except Exception:
                     file_uri = full_path
-                segments.append({'type': 'video', 'data': {'file': file_uri}})
+                segments.append({"type": "video", "data": {"file": file_uri}})
 
     if not segments:
         return None
 
-    if msg_type == 'GroupMessage':
-        ret = await api.call_action('send_group_msg', group_id=int(target_id), message=segments)
-    elif msg_type == 'FriendMessage':
-        ret = await api.call_action('send_private_msg', user_id=int(target_id), message=segments)
+    if msg_type == "GroupMessage":
+        ret = await api.call_action(
+            "send_group_msg", group_id=int(target_id), message=segments
+        )
+    elif msg_type == "FriendMessage":
+        ret = await api.call_action(
+            "send_private_msg", user_id=int(target_id), message=segments
+        )
     else:
         return None
 
     return extract_message_id(ret)
 
 
-async def recall_message_later(plugin, unified_msg_origin: str, message_id: int | str, delay_seconds: int):
+async def recall_message_later(
+    plugin, unified_msg_origin: str, message_id: int | str, delay_seconds: int
+):
     """延时撤回消息，目前仅在 aiocqhttp(OneBot v11) 平台启用。"""
     if delay_seconds <= 0:
         return
@@ -1492,10 +1594,14 @@ async def recall_message_later(plugin, unified_msg_origin: str, message_id: int 
     try:
         await asyncio.sleep(delay_seconds)
 
-        platform_id = unified_msg_origin.split(':', 1)[0] if ':' in unified_msg_origin else ""
+        platform_id = (
+            unified_msg_origin.split(":", 1)[0] if ":" in unified_msg_origin else ""
+        )
         adapter_name = get_platform_adapter_name(plugin, platform_id)
-        if adapter_name != 'aiocqhttp':
-            logger.info(f"平台 {platform_id}({adapter_name}) 暂不支持自动撤回，跳过 message_id={message_id}")
+        if adapter_name != "aiocqhttp":
+            logger.info(
+                f"平台 {platform_id}({adapter_name}) 暂不支持自动撤回，跳过 message_id={message_id}"
+            )
             return
 
         api = get_platform_api_client(plugin, platform_id)
@@ -1503,31 +1609,280 @@ async def recall_message_later(plugin, unified_msg_origin: str, message_id: int 
             logger.warning(f"平台实例缺少可用 API，无法撤回消息: {platform_id}")
             return
 
-        ret = await api.call_action('delete_msg', message_id=message_id)
+        ret = await api.call_action("delete_msg", message_id=message_id)
         logger.info(f"已撤回消息 message_id={message_id}, ret={ret}")
     except Exception as e:
         logger.error(f"自动撤回消息失败 message_id={message_id}: {e}", exc_info=True)
 
 
-async def save_media_component(plugin, msg_comp: Image | Record | Video, prefix: str) -> Optional[Dict[str, str]]:
+async def save_media_component(
+    plugin, msg_comp: Image | Record | Video, prefix: str
+) -> Optional[Dict[str, str]]:
     """保存媒体组件到本地"""
     try:
         source_path = await msg_comp.convert_to_file_path()
         suffix = Path(source_path).suffix or {
-            'image': '.jpg',
-            'record': '.amr',
-            'video': '.mp4',
-        }.get(prefix, '.bin')
+            "image": ".jpg",
+            "record": ".amr",
+            "video": ".mp4",
+        }.get(prefix, ".bin")
 
         filename = f"{prefix}_{time.strftime('%Y%m%d_%H%M%S')}_{hashlib.md5(source_path.encode()).hexdigest()[:8]}{suffix}"
         filepath = os.path.join(plugin.data_dir, filename)
         shutil.copyfile(source_path, filepath)
 
-        return {'type': prefix, 'path': filename}
+        return {"type": prefix, "path": filename}
 
     except Exception as e:
         logger.error(f"保存媒体组件失败: {e}", exc_info=True)
         return None
+
+
+def message_structure_to_tags(message_structure: List[Dict]) -> str:
+    """将 message_structure 转换为带标签的字符串，用于 WebUI 显示。"""
+    if not message_structure:
+        return ""
+    parts = []
+    for comp in message_structure:
+        comp_type = comp.get("type")
+        if comp_type == "text":
+            parts.append(comp.get("content", ""))
+        elif comp_type == "at":
+            parts.append(f"[at:{comp.get('qq', '')}]")
+        elif comp_type == "atall":
+            parts.append("[atall]")
+        elif comp_type == "face":
+            parts.append(f"[face:{comp.get('id', '')}]")
+        elif comp_type in ("image", "record", "video"):
+            parts.append(f"[{comp_type}:{comp.get('path', '')}]")
+    return "".join(parts)
+
+
+def tags_to_message_structure(content: str) -> List[Dict]:
+    """将带标签的字符串解析回 message_structure 列表。"""
+    if not content or not content.strip():
+        return []
+    tag_pattern = re.compile(
+        r"\[(atall|at:(\d+)|face:(\d+)|image:([^\]]+)|record:([^\]]+)|video:([^\]]+))\]",
+        re.IGNORECASE,
+    )
+    structure = []
+    last_end = 0
+    for match in tag_pattern.finditer(content):
+        if match.start() > last_end:
+            text = content[last_end : match.start()]
+            if text:
+                structure.append({"type": "text", "content": text})
+        tag_full = match.group(1).lower()
+        if tag_full.startswith("at:") and match.group(2):
+            structure.append({"type": "at", "qq": match.group(2)})
+        elif tag_full == "atall":
+            structure.append({"type": "atall"})
+        elif tag_full.startswith("face:") and match.group(3):
+            structure.append({"type": "face", "id": int(match.group(3))})
+        elif tag_full.startswith("image:") and match.group(4):
+            structure.append({"type": "image", "path": match.group(4)})
+        elif tag_full.startswith("record:") and match.group(5):
+            structure.append({"type": "record", "path": match.group(5)})
+        elif tag_full.startswith("video:") and match.group(6):
+            structure.append({"type": "video", "path": match.group(6)})
+        last_end = match.end()
+    if last_end < len(content):
+        tail = content[last_end:]
+        if tail:
+            structure.append({"type": "text", "content": tail})
+    return normalize_message_structure(structure) if structure else []
+
+
+def _config_has_valid_data(config):
+    """检查 WebUI 配置是否有有效数据（条目包含 __template_key）。
+    __template_key 是新版代码才有的字段，它的存在说明 _conf 是有效数据源。
+    """
+    reminders_cfg = config.get("reminders_config", [])
+    tasks_cfg = config.get("tasks_config", [])
+    links_cfg = config.get("links_config", [])
+    all_items = reminders_cfg + tasks_cfg + links_cfg
+    if not all_items:
+        return False
+    for item in all_items:
+        if isinstance(item, dict) and item.get("__template_key"):
+            return True
+    return False
+
+
+def sync_config_to_reminders_file(plugin):
+    """将 WebUI 配置 (self.config) 同步到 reminders.json。
+    仅当 _conf 包含带 __template_key 的有效条目时执行。
+    __template_key 是新版代码才写入的字段，它的存在说明 _conf 是用户通过 WebUI 修改产生的有效数据。
+    """
+    config = plugin.config or {}
+    if not _config_has_valid_data(config):
+        return False
+    reminders_cfg = config.get("reminders_config", [])
+    tasks_cfg = config.get("tasks_config", [])
+    links_cfg = config.get("links_config", [])
+    plugin.reminders = []
+    plugin.linked_tasks = {}
+    for item_cfg in reminders_cfg:
+        name = item_cfg.get("name", "").strip()
+        if not name:
+            continue
+        cron = item_cfg.get("cron", "").strip()
+        content = item_cfg.get("content", "")
+        sessions = item_cfg.get("sessions", [])
+        max_exec = item_cfg.get("max_executions", 0)
+        recall = item_cfg.get("recall_after_seconds", 0)
+        message_structure = tags_to_message_structure(content)
+        item = {
+            "name": name,
+            "is_task": False,
+            "cron_expr": cron,
+            "enabled_sessions": sessions,
+            "message_structure": message_structure,
+            "max_executions": max_exec if max_exec > 0 else None,
+        }
+        if recall and recall > 0:
+            item["recall_after_seconds"] = recall
+        plugin.reminders.append(item)
+    for item_cfg in tasks_cfg:
+        name = item_cfg.get("name", "").strip()
+        if not name:
+            continue
+        cron = item_cfg.get("cron", "").strip()
+        command = item_cfg.get("command", "").strip()
+        sessions = item_cfg.get("sessions", [])
+        max_exec = item_cfg.get("max_executions", 0)
+        message_structure = [{"type": "text", "content": command}] if command else []
+        item = {
+            "name": name,
+            "is_task": True,
+            "cron_expr": cron,
+            "command": command,
+            "enabled_sessions": sessions,
+            "message_structure": message_structure,
+            "max_executions": max_exec if max_exec > 0 else None,
+        }
+        plugin.reminders.append(item)
+    for link_cfg in links_cfg:
+        target_name = link_cfg.get("target_reminder_name", "").strip()
+        commands = link_cfg.get("commands", [])
+        if target_name and commands:
+            plugin.linked_tasks[target_name] = [
+                {"command": cmd, "message_structure": []} for cmd in commands
+            ]
+    save_reminders(plugin)
+    return True
+
+
+def sync_reminders_file_to_config(plugin):
+    """将 reminders.json 同步到 WebUI 配置 (self.config)。
+    每次启动都执行，确保 _conf 中 __template_key 正确。
+    """
+    config = plugin.config or {}
+    reminders_cfg = []
+    tasks_cfg = []
+    for item in plugin.reminders:
+        if item.get("is_task", False):
+            task_entry = {
+                "__template_key": "task",
+                "name": item.get("name", ""),
+                "cron": item.get("cron_expr", item.get("cron", "")),
+                "command": item.get("command", ""),
+                "sessions": list(item.get("enabled_sessions", [])),
+                "max_executions": int(item.get("max_executions", 0) or 0),
+            }
+            tasks_cfg.append(task_entry)
+        else:
+            content = message_structure_to_tags(item.get("message_structure", []))
+            reminder_entry = {
+                "__template_key": "reminder",
+                "name": item.get("name", ""),
+                "cron": item.get("cron_expr", item.get("cron", "")),
+                "content": content,
+                "sessions": list(item.get("enabled_sessions", [])),
+                "max_executions": int(item.get("max_executions", 0) or 0),
+                "recall_after_seconds": int(item.get("recall_after_seconds", 0) or 0),
+            }
+            reminders_cfg.append(reminder_entry)
+    links_cfg = []
+    for reminder_name, linked_cmds in plugin.linked_tasks.items():
+        commands = []
+        for cmd_data in linked_cmds:
+            if isinstance(cmd_data, str):
+                commands.append(cmd_data)
+            elif isinstance(cmd_data, dict):
+                commands.append(cmd_data.get("command", ""))
+        if commands:
+            links_cfg.append(
+                {
+                    "__template_key": "link",
+                    "target_reminder_name": reminder_name,
+                    "commands": commands,
+                }
+            )
+    config["reminders_config"] = reminders_cfg
+    config["tasks_config"] = tasks_cfg
+    config["links_config"] = links_cfg
+    plugin.config = config
+    if hasattr(config, "save_config"):
+        config.save_config()
+    return True
+
+
+def update_config_from_runtime(plugin):
+    """在指令操作后，将运行时数据同步回 self.config，保持 WebUI 可见。"""
+    config = plugin.config or {}
+    reminders_cfg = []
+    tasks_cfg = []
+    for item in plugin.reminders:
+        if item.get("is_task", False):
+            tasks_cfg.append(
+                {
+                    "__template_key": "task",
+                    "name": item.get("name", ""),
+                    "cron": item.get("cron_expr", item.get("cron", "")),
+                    "command": item.get("command", ""),
+                    "sessions": list(item.get("enabled_sessions", [])),
+                    "max_executions": int(item.get("max_executions", 0) or 0),
+                }
+            )
+        else:
+            content = message_structure_to_tags(item.get("message_structure", []))
+            reminders_cfg.append(
+                {
+                    "__template_key": "reminder",
+                    "name": item.get("name", ""),
+                    "cron": item.get("cron_expr", item.get("cron", "")),
+                    "content": content,
+                    "sessions": list(item.get("enabled_sessions", [])),
+                    "max_executions": int(item.get("max_executions", 0) or 0),
+                    "recall_after_seconds": int(
+                        item.get("recall_after_seconds", 0) or 0
+                    ),
+                }
+            )
+    links_cfg = []
+    for reminder_name, linked_cmds in plugin.linked_tasks.items():
+        commands = []
+        for cmd_data in linked_cmds:
+            if isinstance(cmd_data, str):
+                commands.append(cmd_data)
+            elif isinstance(cmd_data, dict):
+                commands.append(cmd_data.get("command", ""))
+        if commands:
+            links_cfg.append(
+                {
+                    "__template_key": "link",
+                    "target_reminder_name": reminder_name,
+                    "commands": commands,
+                }
+            )
+    config["reminders_config"] = reminders_cfg
+    config["tasks_config"] = tasks_cfg
+    config["links_config"] = links_cfg
+    plugin.config = config
+    if hasattr(config, "save_config"):
+        config.save_config()
 
 
 async def trigger_reminder(plugin, item: Dict):
@@ -1544,7 +1899,9 @@ async def trigger_reminder(plugin, item: Dict):
             enabled_sessions = list(runtime_item.get("enabled_sessions", []) or [])
             if not enabled_sessions:
                 remove_all_jobs_for_item(plugin, runtime_item)
-                logger.warning(f"任务/提醒 '{runtime_item.get('name')}' 没有启用会话，已跳过执行")
+                logger.warning(
+                    f"任务/提醒 '{runtime_item.get('name')}' 没有启用会话，已跳过执行"
+                )
                 return
 
             for session in enabled_sessions:
@@ -1568,7 +1925,9 @@ async def trigger_reminder(plugin, item: Dict):
                     remove_all_jobs_for_item(plugin, runtime_item)
                     if not runtime_item.get("is_task", False):
                         plugin.linked_tasks.pop(runtime_item.get("name", ""), None)
-                    if item_index is not None and 0 <= item_index < len(plugin.reminders):
+                    if item_index is not None and 0 <= item_index < len(
+                        plugin.reminders
+                    ):
                         plugin.reminders.pop(item_index)
                     _cleanup_item_lock(plugin, runtime_item)
                     logger.info(
@@ -1585,20 +1944,25 @@ async def trigger_reminder(plugin, item: Dict):
 async def send_reminder(plugin, item: Dict, session: str):
     """发送定时提醒"""
     try:
-        message_structure = item.get('message_structure', [])
+        message_structure = item.get("message_structure", [])
         if not message_structure:
             logger.warning(f"提醒 '{item.get('name')}' 没有内容，跳过发送")
             return
 
         # 按平台限制拆分消息
-        from .utils import split_message_structure, build_message_chain_from_structure, extract_message_id
+        from .utils import (
+            split_message_structure,
+            build_message_chain_from_structure,
+            extract_message_id,
+        )
+
         message_chunks = split_message_structure(message_structure)
 
         if not message_chunks:
             logger.warning(f"提醒 '{item.get('name')}' 消息为空")
             return
 
-        recall_after_seconds = int(item.get('recall_after_seconds', 0) or 0)
+        recall_after_seconds = int(item.get("recall_after_seconds", 0) or 0)
         message_ids = []
 
         # 检查撤回支持
@@ -1608,14 +1972,11 @@ async def send_reminder(plugin, item: Dict, session: str):
             recall_supported, recall_reason = check_recall_capability(plugin, session)
             if not recall_supported:
                 logger.warning(
-                    f"提醒 '{item.get('name', 'unknown')}' 配置了自动撤回，但{recall_reason}，本次仅发送不撤回")
+                    f"提醒 '{item.get('name', 'unknown')}' 配置了自动撤回，但{recall_reason}，本次仅发送不撤回"
+                )
 
         for chunk in message_chunks:
-            chain = build_message_chain_from_structure(
-                chunk,
-                plugin.data_dir,
-                logger
-            )
+            chain = build_message_chain_from_structure(chunk, plugin.data_dir, logger)
 
             if not chain:
                 continue
@@ -1625,7 +1986,7 @@ async def send_reminder(plugin, item: Dict, session: str):
             if recall_after_seconds > 0 and recall_supported:
                 message_id = await send_aiocqhttp_with_message_id(
                     plugin,
-                    {'message_structure': chunk},
+                    {"message_structure": chunk},
                     session,
                 )
 
@@ -1644,21 +2005,33 @@ async def send_reminder(plugin, item: Dict, session: str):
             if message_ids:
                 for message_id in message_ids:
                     asyncio.create_task(
-                        recall_message_later(plugin, session, message_id, recall_after_seconds))
+                        recall_message_later(
+                            plugin, session, message_id, recall_after_seconds
+                        )
+                    )
             else:
-                logger.warning(f"提醒已发送但未拿到 message_id，无法自动撤回: {item.get('name')}")
+                logger.warning(
+                    f"提醒已发送但未拿到 message_id，无法自动撤回: {item.get('name')}"
+                )
 
         logger.info(f"提醒 '{item.get('name')}' 已发送到 {session}")
 
         # 处理链接任务
-        linked_commands = plugin.linked_tasks.get(item.get('name'), [])
+        linked_commands = plugin.linked_tasks.get(item.get("name"), [])
         if linked_commands:
-            logger.info(f"提醒 '{item.get('name')}' 有 {len(linked_commands)} 个链接任务，开始执行")
+            logger.info(
+                f"提醒 '{item.get('name')}' 有 {len(linked_commands)} 个链接任务，开始执行"
+            )
             from .reminder_manager import ReminderManager
+
             reminder_manager = ReminderManager(plugin)
             tasks = []
             for linked_command in linked_commands:
-                task = asyncio.create_task(reminder_manager._execute_linked_command(linked_command, session, item))
+                task = asyncio.create_task(
+                    reminder_manager._execute_linked_command(
+                        linked_command, session, item
+                    )
+                )
                 tasks.append(task)
 
             if tasks:
@@ -1690,9 +2063,15 @@ async def handle_recall(plugin, item: Dict, session: str, delay_seconds: int):
         logger.error(f"处理撤回时出错: {e}", exc_info=True)
 
 
-async def execute_linked_command(plugin, command: str, unified_msg_origin: str, item: Dict,
-                                original_components: list = None, is_admin: bool = True,
-                                self_id: str = None):
+async def execute_linked_command(
+    plugin,
+    command: str,
+    unified_msg_origin: str,
+    item: Dict,
+    original_components: list = None,
+    is_admin: bool = True,
+    self_id: str = None,
+):
     """执行链接命令的通用函数"""
     try:
         from .event_factory import EventFactory
@@ -1704,25 +2083,28 @@ async def execute_linked_command(plugin, command: str, unified_msg_origin: str, 
         if not original_components:
             original_components = []
             from .utils import normalize_message_structure
-            cmd_structure = normalize_message_structure([{'type': 'text', 'content': command}])
+
+            cmd_structure = normalize_message_structure(
+                [{"type": "text", "content": command}]
+            )
             for comp in cmd_structure:
-                if comp.get('type') == 'at':
-                    original_components.append(At(qq=comp.get('qq', '')))
-                elif comp.get('type') == 'atall':
+                if comp.get("type") == "at":
+                    original_components.append(At(qq=comp.get("qq", "")))
+                elif comp.get("type") == "atall":
                     original_components.append(At(qq="all"))
-                elif comp.get('type') == 'face':
-                    original_components.append(Face(id=comp.get('id')))
+                elif comp.get("type") == "face":
+                    original_components.append(Face(id=comp.get("id")))
 
         # 创建事件并派发
         event_factory = EventFactory(plugin.context)
         event = event_factory.create_event(
             unified_msg_origin,
             command,
-            item.get('created_by', 'timer'),
-            item.get('creator_name', 'Timer'),
+            item.get("created_by", "timer"),
+            item.get("creator_name", "Timer"),
             original_components=original_components or [],
             is_admin=is_admin,
-            self_id=self_id
+            self_id=self_id,
         )
 
         try:
@@ -1744,24 +2126,24 @@ async def execute_task(plugin, item: Dict, session: str):
         from .event_factory import EventFactory
         from astrbot.api.message_components import At, Face
 
-        command = item.get('command', '')
+        command = item.get("command", "")
         if not command:
             logger.warning(f"任务 '{item.get('name')}' 没有指令，跳过执行")
             return
 
-        original_components = item.get('message_structure', [])
-        is_admin = item.get('is_admin', True)
-        self_id = item.get('self_id')
+        original_components = item.get("message_structure", [])
+        is_admin = item.get("is_admin", True)
+        self_id = item.get("self_id")
 
         # 转换消息结构为组件
         component_list = []
         for comp_data in original_components:
-            if comp_data.get('type') == 'at':
-                component_list.append(At(qq=comp_data.get('qq')))
-            elif comp_data.get('type') == 'atall':
+            if comp_data.get("type") == "at":
+                component_list.append(At(qq=comp_data.get("qq")))
+            elif comp_data.get("type") == "atall":
                 component_list.append(At(qq="all"))
-            elif comp_data.get('type') == 'face':
-                component_list.append(Face(id=comp_data.get('id')))
+            elif comp_data.get("type") == "face":
+                component_list.append(Face(id=comp_data.get("id")))
 
         logger.info(f"任务 '{item.get('name')}' 执行: {command}")
 
@@ -1770,11 +2152,11 @@ async def execute_task(plugin, item: Dict, session: str):
         event = event_factory.create_event(
             session,
             command,
-            item.get('created_by', 'timer'),
-            item.get('creator_name', 'Timer'),
+            item.get("created_by", "timer"),
+            item.get("creator_name", "Timer"),
             original_components=component_list,
             is_admin=is_admin,
-            self_id=self_id
+            self_id=self_id,
         )
 
         try:

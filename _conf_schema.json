@@ -3,6 +3,127 @@
         "description": "白名单用户",
         "hint": "只有白名单用户或管理员可以使用指令",
         "type": "list",
-        "default": []
+        "default": [],
+        "items": { "type": "string", "description": "用户QQ号" }
+    },
+    "reminders_config": {
+        "description": "定时提醒管理",
+        "type": "template_list",
+        "hint": "点击【添加条目】创建新的定时提醒。可添加多个，支持富媒体标签（如 [at:QQ号], [atall], [face:表情ID], [image:路径]）。",
+        "templates": {
+            "reminder": {
+                "name": "定时提醒",
+                "hint": "在指定时间向指定会话发送富媒体消息",
+                "items": {
+                    "name": {
+                        "description": "提醒名称",
+                        "type": "string",
+                        "default": "新提醒",
+                        "hint": "唯一标识，不能为纯数字"
+                    },
+                    "cron": {
+                        "description": "Cron 表达式",
+                        "type": "string",
+                        "default": "0 9 * * *",
+                        "hint": "5段格式：分 时 日 月 周。例如 0 9 * * * 表示每天9点"
+                    },
+                    "content": {
+                        "description": "提醒内容",
+                        "type": "text",
+                        "default": "",
+                        "hint": "支持文本和标签：[at:QQ号], [atall], [face:表情ID], [image:路径], [record:路径], [video:路径]"
+                    },
+                    "sessions": {
+                        "description": "生效会话",
+                        "type": "list",
+                        "default": [],
+                        "hint": "格式：@好友号 (私聊) 或 #群号 (群聊)。例如: @123456, #67890",
+                        "items": { "type": "string", "description": "会话标识" }
+                    },
+                    "max_executions": {
+                        "description": "执行轮次上限",
+                        "type": "int",
+                        "default": 0,
+                        "hint": "0 表示不限次数。达到上限后提醒将自动移除"
+                    },
+                    "recall_after_seconds": {
+                        "description": "自动撤回秒数",
+                        "type": "int",
+                        "default": 0,
+                        "hint": "0 表示不撤回。仅 aiocqhttp 平台支持自动撤回"
+                    }
+                }
+            }
+        }
+    },
+    "tasks_config": {
+        "description": "定时任务管理",
+        "type": "template_list",
+        "hint": "点击【添加条目】创建新的定时任务。任务会在指定时间自动执行机器人指令。",
+        "templates": {
+            "task": {
+                "name": "定时任务",
+                "hint": "在指定时间向指定会话发送指令",
+                "items": {
+                    "name": {
+                        "description": "任务名称",
+                        "type": "string",
+                        "default": "新任务",
+                        "hint": "唯一标识，不能为纯数字"
+                    },
+                    "cron": {
+                        "description": "Cron 表达式",
+                        "type": "string",
+                        "default": "0 9 * * *",
+                        "hint": "5段格式：分 时 日 月 周。例如 0 9 * * * 表示每天9点"
+                    },
+                    "command": {
+                        "description": "执行指令",
+                        "type": "string",
+                        "default": "",
+                        "hint": "要执行的指令，例如 /签到。支持 [at:QQ号], [atall] 占位符"
+                    },
+                    "sessions": {
+                        "description": "生效会话",
+                        "type": "list",
+                        "default": [],
+                        "hint": "格式：@好友号 (私聊) 或 #群号 (群聊)。例如: @123456, #67890",
+                        "items": { "type": "string", "description": "会话标识" }
+                    },
+                    "max_executions": {
+                        "description": "执行轮次上限",
+                        "type": "int",
+                        "default": 0,
+                        "hint": "0 表示不限次数。达到上限后任务将自动移除"
+                    }
+                }
+            }
+        }
+    },
+    "links_config": {
+        "description": "链接任务管理",
+        "type": "template_list",
+        "hint": "点击【添加条目】将指令链接到提醒。当提醒触发时，会自动执行此处配置的指令。",
+        "templates": {
+            "link": {
+                "name": "链接指令",
+                "hint": "提醒执行后自动执行的指令",
+                "items": {
+                    "target_reminder_name": {
+                        "description": "关联提醒名称",
+                        "type": "string",
+                        "default": "",
+                        "hint": "需与上方【定时提醒】中的提醒名称完全一致"
+                    },
+                    "commands": {
+                        "description": "指令列表",
+                        "type": "list",
+                        "default": [],
+                        "hint": "提醒触发后，按顺序执行的指令列表",
+                        "items": { "type": "string", "description": "指令内容" }
+                    }
+                }
+            }
+        }
     }
 }
