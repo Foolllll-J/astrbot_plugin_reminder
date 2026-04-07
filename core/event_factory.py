@@ -153,7 +153,7 @@ class EventFactory:
             msg.self_id = ""
             logger.debug("未提供机器人ID，使用空字符串")
 
-        msg.message_id = f"command_trigger_{uuid.uuid4().hex}"
+        msg.message_id = str(uuid.uuid4().int)[:16]
 
         # 设置发送者信息
         msg.sender = MessageMember(user_id=creator_id, nickname=creator_name or "用户")
