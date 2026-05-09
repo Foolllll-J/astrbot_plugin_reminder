@@ -9,13 +9,14 @@ from typing import Dict, List, AsyncGenerator
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent
 from astrbot.core.platform.astrbot_message import MessageType
-from astrbot.api.message_components import At, Face
 from apscheduler.triggers.cron import CronTrigger
 
 from .utils import (
     apply_execution_limit,
+    collect_task_command_texts,
     collect_text_from_message_structure,
     describe_origin,
+    execute_task as dispatch_task,
     extract_plain_text_tokens,
     extract_inline_message_structure,
     normalize_session_param_token,
@@ -23,10 +24,10 @@ from .utils import (
     parse_add_scene_arguments,
     parse_edit_scene_tokens,
     resolve_session_origin,
+    split_task_commands_text,
     translate_to_apscheduler_cron,
     is_user_allowed,
 )
-from .event_factory import EventFactory
 
 
 class TaskManager:
@@ -49,6 +50,17 @@ class TaskManager:
             if item.get('name') == identifier:
                 return item
         return None
+
+    def _get_task_commands(self, item: Dict) -> List[str]:
+        return collect_task_command_texts(item)
+
+    def _format_task_commands(self, item: Dict, *, numbered: bool = False) -> str:
+        commands = self._get_task_commands(item)
+        if not commands:
+            return "N/A"
+        if numbered:
+            return "\n".join(f"{idx}. {command}" for idx, command in enumerate(commands, 1))
+        return " | ".join(commands)
 
     async def add_task(self, event: AstrMessageEvent) -> AsyncGenerator[str, None]:
         """添加定时任务"""
@@ -136,6 +148,7 @@ class TaskManager:
             result_msg = f"✅ 任务 '{name}' 添加成功！\nCron: {cron_expr}\n目标: {describe_origin(target_origin)}"
             if max_executions is not None:
                 result_msg += f"\n执行轮次上限: {max_executions if max_executions > 0 else '不限'}"
+            result_msg += f"\n步骤: {self._format_task_commands(item)}"
             yield result_msg
 
         except Exception as e:
@@ -186,7 +199,7 @@ class TaskManager:
             # 如果没有提供剩余参数，显示当前配置
             if not parsed_edit["tokens_after_session"] and not session_params:
                 current_cron = target_item.get('cron_expr', target_item.get('cron', '未设置'))
-                current_command = target_item.get('command', '未设置')
+                current_command = self._format_task_commands(target_item, numbered=True)
 
                 enabled_sessions = target_item.get('enabled_sessions', [])
                 sessions_info = ""
@@ -195,7 +208,7 @@ class TaskManager:
                 else:
                     sessions_info = "\n📍 当前会话: 无"
 
-                yield f"📋 当前任务配置：\nCron: {current_cron}\n指令: {current_command}{sessions_info}"
+                yield f"📋 当前任务配置：\nCron: {current_cron}\n步骤:\n{current_command}{sessions_info}"
                 return
 
             # 如果有会话参数，解析并更新会话
@@ -260,7 +273,7 @@ class TaskManager:
                 "✅ 任务已编辑！\n"
                 f"名称: {target_item.get('name', '')}\n"
                 f"cron: {current_cron}\n"
-                f"指令: {target_item.get('command', '')}\n"
+                f"步骤: {self._format_task_commands(target_item)}\n"
                 f"已影响会话数: {session_count}"
             )
             if 'max_executions' in target_item:
@@ -408,7 +421,7 @@ class TaskManager:
                 else:
                     info_text += f"📅 创建时间: {target_item.get('created_at', 'N/A')}\n"
                 info_text += f"👤 创建者ID: {target_item.get('created_by', '未知')}\n"
-                info_text += f"\n🔧 执行指令:\n{target_item.get('command', 'N/A')}\n"
+                info_text += f"\n🔧 执行步骤:\n{self._format_task_commands(target_item, numbered=True)}\n"
 
                 yield info_text
             else:
@@ -434,7 +447,7 @@ class TaskManager:
                         except Exception:
                             executed_count = 0
                         result += f"   轮次: {executed_count}/{max_executions}\n"
-                    result += f"   指令: {item.get('command', 'N/A')}\n"
+                    result += f"   步骤: {self._format_task_commands(item)}\n"
                     result += f"   创建时间: {item.get('created_at', 'N/A')}\n\n"
 
                 result += "💡 使用 /查看任务 <序号或名称> 查看详细内容"
@@ -557,47 +570,7 @@ class TaskManager:
 
     async def execute_task(self, item: Dict, session: str):
         """执行定时任务"""
-        command = item.get('command', '')
-        if not command:
-            logger.warning(f"任务 '{item.get('name')}' 没有指令，跳过执行")
-            return
-
-        original_components = item.get('message_structure', [])
-        is_admin = item.get('is_admin', True)
-        self_id = item.get('self_id')
-
-        # 转换消息结构为组件
-        component_list = []
-        for comp_data in original_components:
-            if comp_data.get('type') == 'at':
-                component_list.append(At(qq=comp_data.get('qq')))
-            elif comp_data.get('type') == 'atall':
-                component_list.append(At(qq="all"))
-            elif comp_data.get('type') == 'face':
-                component_list.append(Face(id=comp_data.get('id')))
-
-        logger.info(f"任务 '{item.get('name')}' 执行: {command}")
-
-        # 直接创建事件并派发
-        factory = EventFactory(self.plugin.context)
-        event = factory.create_event(
-            session,
-            command,
-            item.get('created_by', 'timer'),
-            item.get('creator_name', 'Timer'),
-            original_components=component_list,
-            is_admin=is_admin,
-            self_id=self_id
-        )
-
-        try:
-            event.set_extra("reminder_timer_origin", True)
-        except Exception:
-            pass
-
-        # 派发事件
-        self.plugin.context.get_event_queue().put_nowait(event)
-        logger.info(f"任务 '{item.get('name')}' 已派发: {command}")
+        await dispatch_task(self.plugin, item, session)
 
     async def _process_command_content(self, event, item: Dict, command: str, cron_expr: str):
         """处理指令内容（新增和编辑都使用相同逻辑）"""
@@ -613,7 +586,12 @@ class TaskManager:
         if not final_command:
             raise ValueError("任务指令不能为空")
 
-        item['command'] = final_command
+        commands = split_task_commands_text(final_command)
+        if not commands:
+            raise ValueError("任务指令不能为空")
+
+        item['commands'] = commands
+        item['command'] = commands[0]['command']
         if message_structure:
             item['message_structure'] = message_structure
 

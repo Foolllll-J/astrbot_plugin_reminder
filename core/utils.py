@@ -14,6 +14,8 @@ from astrbot.api import logger
 from astrbot.api.event import MessageChain
 from astrbot.api.message_components import At, Face, Image, Plain, Record, Video
 
+from .event_factory import EventFactory
+
 
 def translate_to_apscheduler_cron(cron_expr: str) -> str:
     """将标准 cron 表达式转换为 APScheduler 兼容格式。"""
@@ -417,6 +419,41 @@ def collect_text_from_message_structure(message_structure: List[Dict]) -> str:
         if comp.get("type") == "text":
             text_parts.append(comp.get("content", ""))
     return "".join(text_parts)
+
+
+def split_task_commands_text(command_text: str) -> List[Dict[str, str]]:
+    """将任务命令按 `&&` 拆分为多个顺序执行的命令步骤。"""
+    commands: List[Dict[str, str]] = []
+    for part in str(command_text or "").split("&&"):
+        normalized = part.strip()
+        if normalized:
+            commands.append({"command": normalized})
+    return commands
+
+
+def collect_task_command_texts(item: Dict[str, Any]) -> List[str]:
+    """返回任务指令文本列表，优先使用 commands 字段，兼容旧版 command 字段。"""
+    raw_commands = item.get("commands")
+    normalized_commands: List[str] = []
+
+    if isinstance(raw_commands, list):
+        for command_item in raw_commands:
+            if isinstance(command_item, str):
+                command_text = command_item.strip()
+            elif isinstance(command_item, dict):
+                command_text = str(command_item.get("command", "")).strip()
+            else:
+                command_text = ""
+            if command_text:
+                normalized_commands.append(command_text)
+
+    if normalized_commands:
+        return normalized_commands
+
+    fallback_command = str(item.get("command", "") or "").strip()
+    if not fallback_command:
+        return []
+    return [command["command"] for command in split_task_commands_text(fallback_command)]
 
 
 async def extract_message_structure_from_components(
@@ -967,12 +1004,6 @@ def build_message_chain_from_structure(
         return adjusted
 
     adjusted_items = _inject_space_after_at(message_structure or [])
-    if message_structure != adjusted_items:
-        logger.debug(
-            "[reminder] build_message_chain_from_structure adjusted items: %s -> %s",
-            message_structure,
-            adjusted_items,
-        )
 
     for msg_item in adjusted_items:
         component = build_component_from_item(msg_item, data_dir, logger)
@@ -1074,6 +1105,29 @@ def load_reminders(plugin):
                     if normalized_command and normalized_command != item.get('command', ''):
                         item['command'] = normalized_command
                         need_resave = True
+
+            if item.get('is_task', False):
+                raw_commands = item.get('commands')
+                if isinstance(raw_commands, list):
+                    normalized_commands = []
+                    for command_item in raw_commands:
+                        if isinstance(command_item, str):
+                            command_text = command_item.strip()
+                        elif isinstance(command_item, dict):
+                            command_text = str(command_item.get('command', '')).strip()
+                        else:
+                            command_text = ""
+                        if command_text:
+                            normalized_commands.append({'command': command_text})
+                    if normalized_commands != raw_commands:
+                        item['commands'] = normalized_commands
+                        need_resave = True
+                else:
+                    fallback_command = str(item.get('command', '') or '').strip()
+                    item['commands'] = split_task_commands_text(fallback_command)
+                    if item['commands']:
+                        item['command'] = item['commands'][0]['command']
+                    need_resave = True
 
             raw_max_executions = item.get("max_executions")
             if raw_max_executions is None:
@@ -1189,7 +1243,7 @@ async def restore_reminders(plugin):
             except Exception as e:
                 logger.error(f"恢复任务 {item.get('name')} 失败: {e}")
 
-        logger.info(f"已恢复 {count} 个任务/提醒")
+        logger.debug(f"已恢复 {count} 个任务/提醒")
     except Exception as e:
         logger.error(f"恢复数据失败: {e}", exc_info=True)
 
@@ -1326,6 +1380,11 @@ def remove_all_jobs_for_item(plugin, item: Dict):
 async def schedule_reminder(plugin, item: Dict):
     """调度提醒或任务（单任务单 job）。"""
     try:
+        if item.get("is_paused", False):
+            remove_all_jobs_for_item(plugin, item)
+            logger.info(f"任务/提醒 '{item.get('name')}' 已暂停，跳过调度")
+            return
+
         sessions = item.get("enabled_sessions", [])
         if not sessions:
             remove_all_jobs_for_item(plugin, item)
@@ -1541,6 +1600,11 @@ async def trigger_reminder(plugin, item: Dict):
                 remove_all_jobs_for_item(plugin, item)
                 return
 
+            if runtime_item.get("is_paused", False):
+                remove_all_jobs_for_item(plugin, runtime_item)
+                logger.info(f"任务/提醒 '{runtime_item.get('name')}' 已暂停，跳过执行")
+                return
+
             enabled_sessions = list(runtime_item.get("enabled_sessions", []) or [])
             if not enabled_sessions:
                 remove_all_jobs_for_item(plugin, runtime_item)
@@ -1591,7 +1655,6 @@ async def send_reminder(plugin, item: Dict, session: str):
             return
 
         # 按平台限制拆分消息
-        from .utils import split_message_structure, build_message_chain_from_structure, extract_message_id
         message_chunks = split_message_structure(message_structure)
 
         if not message_chunks:
@@ -1648,12 +1711,12 @@ async def send_reminder(plugin, item: Dict, session: str):
             else:
                 logger.warning(f"提醒已发送但未拿到 message_id，无法自动撤回: {item.get('name')}")
 
-        logger.info(f"提醒 '{item.get('name')}' 已发送到 {session}")
+        logger.debug(f"提醒 '{item.get('name')}' 已发送到 {session}")
 
         # 处理链接任务
         linked_commands = plugin.linked_tasks.get(item.get('name'), [])
         if linked_commands:
-            logger.info(f"提醒 '{item.get('name')}' 有 {len(linked_commands)} 个链接任务，开始执行")
+            logger.debug(f"提醒 '{item.get('name')}' 有 {len(linked_commands)} 个链接任务，开始执行")
             from .reminder_manager import ReminderManager
             reminder_manager = ReminderManager(plugin)
             tasks = []
@@ -1663,7 +1726,7 @@ async def send_reminder(plugin, item: Dict, session: str):
 
             if tasks:
                 await asyncio.gather(*tasks, return_exceptions=True)
-                logger.info(f"提醒 '{item.get('name')}' 的所有链接任务执行完成")
+                logger.debug(f"提醒 '{item.get('name')}' 的所有链接任务执行完成")
 
     except Exception as e:
         logger.error(f"发送提醒 '{item.get('name')}' 时出错: {e}", exc_info=True)
@@ -1695,15 +1758,10 @@ async def execute_linked_command(plugin, command: str, unified_msg_origin: str, 
                                 self_id: str = None):
     """执行链接命令的通用函数"""
     try:
-        from .event_factory import EventFactory
-        from astrbot.api.message_components import At, Face
-
-        logger.info(f"执行链接任务: {command}")
 
         # 如果没有传入组件，从 command 文本中解析组件（兼容历史数据）
         if not original_components:
             original_components = []
-            from .utils import normalize_message_structure
             cmd_structure = normalize_message_structure([{'type': 'text', 'content': command}])
             for comp in cmd_structure:
                 if comp.get('type') == 'at':
@@ -1732,7 +1790,6 @@ async def execute_linked_command(plugin, command: str, unified_msg_origin: str, 
 
         # 派发事件
         plugin.context.get_event_queue().put_nowait(event)
-        logger.info(f"链接任务已派发: {command}")
 
     except Exception as e:
         logger.error(f"执行链接命令失败: {e}", exc_info=True)
@@ -1741,11 +1798,9 @@ async def execute_linked_command(plugin, command: str, unified_msg_origin: str, 
 async def execute_task(plugin, item: Dict, session: str):
     """执行定时任务"""
     try:
-        from .event_factory import EventFactory
-        from astrbot.api.message_components import At, Face
 
-        command = item.get('command', '')
-        if not command:
+        commands = collect_task_command_texts(item)
+        if not commands:
             logger.warning(f"任务 '{item.get('name')}' 没有指令，跳过执行")
             return
 
@@ -1763,28 +1818,25 @@ async def execute_task(plugin, item: Dict, session: str):
             elif comp_data.get('type') == 'face':
                 component_list.append(Face(id=comp_data.get('id')))
 
-        logger.info(f"任务 '{item.get('name')}' 执行: {command}")
-
-        # 创建事件并派发
         event_factory = EventFactory(plugin.context)
-        event = event_factory.create_event(
-            session,
-            command,
-            item.get('created_by', 'timer'),
-            item.get('creator_name', 'Timer'),
-            original_components=component_list,
-            is_admin=is_admin,
-            self_id=self_id
-        )
+        for command in commands:
+            event = event_factory.create_event(
+                session,
+                command,
+                item.get('created_by', 'timer'),
+                item.get('creator_name', 'Timer'),
+                original_components=component_list,
+                is_admin=is_admin,
+                self_id=self_id
+            )
 
-        try:
-            event.set_extra("reminder_timer_origin", True)
-        except Exception:
-            pass
+            try:
+                event.set_extra("reminder_timer_origin", True)
+            except Exception:
+                pass
 
-        # 派发事件
-        plugin.context.get_event_queue().put_nowait(event)
-        logger.info(f"任务 '{item.get('name')}' 已派发: {command}")
+            plugin.context.get_event_queue().put_nowait(event)
+        logger.info(f"任务 '{item.get('name')}' 的 {len(commands)} 条指令已全部派发至 {session}")
 
     except Exception as e:
         logger.error(f"执行任务失败: {item.get('name', 'unknown')}, {e}", exc_info=True)

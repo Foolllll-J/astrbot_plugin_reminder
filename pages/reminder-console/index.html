@@ -1,0 +1,192 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>提醒控制台</title>
+    <link rel="stylesheet" href="./style.css" />
+  </head>
+  <body>
+    <div class="shell">
+      <aside class="sidebar">
+        <div class="brand">
+          <div class="brand-copy">
+            <div class="eyebrow">Time is money.</div>
+            <h1>Reminder Console</h1>
+          </div>
+          <button id="refreshBtn" class="icon-button refresh-button" type="button" aria-label="刷新">
+            <svg class="refresh-icon" viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M16.8 6.1A7 7 0 1 0 16.8 17.9" />
+              <path d="M20 9v-5" />
+              <path d="M20 9h-5" />
+            </svg>
+          </button>
+        </div>
+
+        <div class="toolbar">
+          <div class="toolbar-top">
+            <div class="tab-row tab-group">
+              <button class="tab active" data-kind="reminder" type="button">提醒</button>
+              <button class="tab" data-kind="task" type="button">任务</button>
+            </div>
+            <button id="newItemBtn" class="create-button" type="button">＋ 新建</button>
+          </div>
+          <div class="search-row">
+            <input id="searchInput" class="text-input" type="search" placeholder="搜索名称 / 会话 / cron" />
+          </div>
+        </div>
+
+        <div id="listMeta" class="list-meta"></div>
+        <div id="itemList" class="item-list"></div>
+      </aside>
+
+      <main class="editor">
+        <div id="emptyState" class="empty-state">
+          <div class="empty-state-inner">
+            <h2>新建或选择一个对象开始编辑</h2>
+          </div>
+        </div>
+
+        <form id="editorForm" class="editor-form hidden">
+          <div class="editor-header">
+            <div>
+              <div class="eyebrow editor-eyebrow" id="editorModeLabel">Reminder</div>
+              <h2 id="editorTitle">未命名</h2>
+            </div>
+            <div class="header-actions">
+              <button id="saveBtn" class="primary-button" type="submit">保存</button>
+              <button id="triggerBtn" class="secondary-button" type="button">立即执行</button>
+              <button id="deleteBtn" class="danger-button" type="button">删除</button>
+            </div>
+          </div>
+
+          <div id="statusBanner" class="status-banner hidden" role="status" aria-live="polite"></div>
+
+          <section class="panel">
+            <div class="panel-title">基本信息</div>
+            <div class="grid two">
+              <label class="field">
+                <span>名称</span>
+                <input id="nameInput" class="text-input" type="text" />
+              </label>
+              <label class="field">
+                <span>类型</span>
+                <select id="typeInput" class="text-input">
+                  <option value="reminder">提醒</option>
+                  <option value="task">任务</option>
+                </select>
+              </label>
+            </div>
+          </section>
+
+          <section class="panel">
+            <div class="panel-title">调度规则</div>
+            <div class="grid five">
+              <label class="field">
+                <span>分钟</span>
+                <input id="cronMinute" class="text-input mono" type="text" />
+              </label>
+              <label class="field">
+                <span>小时</span>
+                <input id="cronHour" class="text-input mono" type="text" />
+              </label>
+              <label class="field">
+                <span>日</span>
+                <input id="cronDay" class="text-input mono" type="text" />
+              </label>
+              <label class="field">
+                <span>月</span>
+                <input id="cronMonth" class="text-input mono" type="text" />
+              </label>
+              <label class="field">
+                <span>周</span>
+                <input id="cronWeekday" class="text-input mono" type="text" />
+              </label>
+            </div>
+            <div class="hint-row preset-row">
+              <button class="chip-button" data-cron-preset="daily" type="button">每天 09:00</button>
+              <button class="chip-button" data-cron-preset="workday" type="button">工作日 09:00</button>
+              <button class="chip-button" data-cron-preset="hourly" type="button">每小时</button>
+              <span id="cronPreview" class="inline-hint"></span>
+            </div>
+          </section>
+
+          <section class="panel">
+            <div class="panel-title">目标会话</div>
+            <div class="session-builder">
+              <input
+                id="sessionOrigin"
+                class="text-input mono"
+                type="text"
+                placeholder="例如 DemoBot:GroupMessage:123456789"
+              />
+              <button id="addSessionBtn" class="secondary-button session-add-button" type="button">添加</button>
+            </div>
+            <div id="sessionList" class="stack-list"></div>
+          </section>
+
+          <section id="executionRecallPanel" class="panel">
+            <div class="panel-title">执行与撤回</div>
+            <div class="grid five execution-recall-grid">
+              <label class="field">
+                <span>执行次数</span>
+                <input id="executionCount" class="text-input mono" type="number" min="0" value="0" />
+              </label>
+              <label class="field">
+                <span>撤回天</span>
+                <input id="recallDays" class="text-input mono" type="number" min="0" value="0" />
+              </label>
+              <label class="field">
+                <span>撤回时</span>
+                <input id="recallHours" class="text-input mono" type="number" min="0" value="0" />
+              </label>
+              <label class="field">
+                <span>撤回分</span>
+                <input id="recallMinutes" class="text-input mono" type="number" min="0" value="0" />
+              </label>
+              <label class="field">
+                <span>撤回秒</span>
+                <input id="recallSeconds" class="text-input mono" type="number" min="0" value="0" />
+              </label>
+            </div>
+            <div class="inline-hint section-hint">执行次数为 0 表示不限，撤回参数全为 0 表示关闭。</div>
+          </section>
+
+          <section id="reminderContentPanel" class="panel">
+            <div class="panel-head">
+              <div class="panel-title">提醒内容</div>
+              <div class="button-row">
+                <button class="chip-button" data-component="text" type="button">文本</button>
+                <button class="chip-button" data-component="at" type="button">@成员</button>
+                <button class="chip-button" data-component="atall" type="button">@全体</button>
+                <button class="chip-button upload-button" data-upload-type="image" type="button">图片</button>
+                <button class="chip-button upload-button" data-upload-type="video" type="button">视频</button>
+                <button class="chip-button upload-button" data-upload-type="record" type="button">语音</button>
+              </div>
+            </div>
+            <input id="hiddenUploadInput" type="file" class="hidden" />
+            <div id="messageStructureList" class="stack-list"></div>
+          </section>
+
+          <section id="taskCommandPanel" class="panel hidden">
+            <div class="panel-head">
+              <div class="panel-title">任务步骤</div>
+              <button id="addTaskCommandBtn" class="chip-button" type="button">添加步骤</button>
+            </div>
+            <div id="taskCommandList" class="stack-list"></div>
+          </section>
+
+          <section id="linkedCommandPanel" class="panel">
+            <div class="panel-head">
+              <div class="panel-title">链接指令</div>
+              <button id="addLinkedCommandBtn" class="chip-button" type="button">+ 添加</button>
+            </div>
+            <div id="linkedCommandList" class="stack-list"></div>
+          </section>
+        </form>
+      </main>
+    </div>
+
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>

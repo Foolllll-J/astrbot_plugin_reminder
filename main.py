@@ -27,6 +27,8 @@ from .core.utils import (
 from .core.task_manager import TaskManager
 from .core.reminder_manager import ReminderManager
 from .core.linked_task_manager import LinkedTaskManager
+from .webui.api import ReminderWebUIApi
+from .webui.context_store import build_context_from_event, load_webui_context, save_webui_context
 
 
 class ReminderPlugin(Star):
@@ -37,10 +39,14 @@ class ReminderPlugin(Star):
         self.data_dir = StarTools.get_data_dir("astrbot_plugin_reminder")
         os.makedirs(self.data_dir, exist_ok=True)
         self.data_file = os.path.join(self.data_dir, "reminders.json")
+        self.webui_context_file = os.path.join(self.data_dir, "webui_context.json")
         self.reminders: List[Dict] = []
         self.linked_tasks: Dict[str, List[Dict]] = {}
         self.job_mapping: Dict[str, Dict[str, str]] = {}
+        self.webui_context: Dict | None = load_webui_context(self.webui_context_file)
         load_reminders(self)
+        self.webui_api = ReminderWebUIApi(self)
+        self.webui_api.register()
         self.whitelist = self.config.get('whitelist', [])
         self._recall_notice_sent: set[str] = set()
 
@@ -122,6 +128,10 @@ class ReminderPlugin(Star):
     async def _save_media_component(self, msg_comp, prefix: str):
         """保存媒体组件到本地"""
         return await save_media_component(self, msg_comp, prefix)
+
+    def _save_webui_context(self, payload: Dict) -> None:
+        self.webui_context = payload
+        save_webui_context(self.webui_context_file, payload)
 
     async def _send_aiocqhttp_with_message_id(self, item: Dict, unified_msg_origin: str):
         """通过 OneBot v11 发送并获取 message_id"""
@@ -305,6 +315,23 @@ class ReminderPlugin(Star):
         linked_task_manager = LinkedTaskManager(self)
         async for result in linked_task_manager.delete_linked_task(event, reminder_index, command_index):
             yield event.plain_result(result)
+
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @filter.command("启动提醒控制台")
+    async def start_reminder_console(self, event: AstrMessageEvent):
+        """绑定提醒控制台使用的身份上下文"""
+
+        payload = build_context_from_event(event)
+        if not payload.get("created_by") or not payload.get("source_origin"):
+            yield event.plain_result("当前事件缺少必要上下文，暂时无法启动提醒控制台。")
+            return
+
+        self._save_webui_context(payload)
+        creator_name = payload.get("creator_name") or payload.get("created_by")
+        source_origin = payload.get("source_origin")
+        yield event.plain_result(
+            f"提醒控制台已启动。\n当前绑定用户: {creator_name}\n来源会话: {source_origin}"
+        )
 
     async def terminate(self):
         """插件卸载时强制清理所有任务"""

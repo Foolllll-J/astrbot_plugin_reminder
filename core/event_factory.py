@@ -19,7 +19,6 @@ class EventFactory:
         try:
             platform_inst = self.context.get_platform_inst(platform_id)
             if platform_inst:
-                logger.debug(f"成功通过平台ID获取平台实例: {platform_id}")
                 return platform_inst
         except Exception as e:
             logger.warning(f"通过context.get_platform_inst获取平台实例失败: {e}")
@@ -35,7 +34,10 @@ class EventFactory:
         creator_name: str = None,
         original_components: list = None,
         is_admin: bool = False,
-        self_id: str = None
+        self_id: str = None,
+        sender_id: str = None,
+        sender_name: str = None,
+        source_message_id: str = None,
     ) -> AstrMessageEvent:
         """创建事件对象，根据平台类型自动选择正确的事件类"""
 
@@ -63,12 +65,10 @@ class EventFactory:
         
         # 获取真实的平台类型
         platform_type = self._get_platform_type_from_instance(platform_instance, unified_msg_origin)
-        logger.debug(f"create_event: 获取到的平台类型={platform_type}")
-
         # 创建基础消息对象，传递原始组件
         msg = self._create_message_object(
             command, session_id, message_type, creator_id,
-            creator_name, platform_instance, original_components, self_id
+            creator_name, platform_instance, original_components, self_id, source_message_id
         )
 
         # 创建平台元数据
@@ -80,9 +80,11 @@ class EventFactory:
         )
         
         _is_admin = is_admin
+        _sender_id = sender_id if sender_id else creator_id
+        _sender_name = sender_name if sender_name else (creator_name or "用户")
         event.is_admin = lambda: _is_admin
-        event.get_sender_id = lambda: creator_id
-        event.get_sender_name = lambda: creator_name or "用户"
+        event.get_sender_id = lambda: _sender_id
+        event.get_sender_name = lambda: _sender_name
         
         return event
 
@@ -126,7 +128,8 @@ class EventFactory:
         creator_name: str = None,
         platform_instance=None,
         original_components: list = None,
-        self_id: str = None
+        self_id: str = None,
+        source_message_id: str = None
     ) -> AstrBotMessage:
         """创建消息对象
         
@@ -148,12 +151,11 @@ class EventFactory:
         # 设置机器人ID
         if self_id:
             msg.self_id = self_id
-            logger.debug(f"使用提供的机器人ID: {self_id}")
         else:
             msg.self_id = ""
             logger.debug("未提供机器人ID，使用空字符串")
 
-        msg.message_id = f"command_trigger_{uuid.uuid4().hex}"
+        msg.message_id = str(uuid.uuid4().int)[:16]
 
         # 设置发送者信息
         msg.sender = MessageMember(user_id=creator_id, nickname=creator_name or "用户")
@@ -170,12 +172,10 @@ class EventFactory:
         has_plain = original_components and any(isinstance(x, Plain) for x in original_components)
         if has_plain:
             message_chain = original_components
-            logger.debug(f"使用完整的原始消息链，长度: {len(message_chain)}")
         else:
             message_chain = [Plain(command)]
             if original_components:
                 message_chain.extend(original_components)
-                logger.debug(f"消息链中添加了 {len(original_components)} 个原始组件")
         msg.message = message_chain
 
         # 设置raw_message属性
@@ -259,13 +259,13 @@ class EventFactory:
             module_path, class_name, attr_name = platform_event_map[platform_name]
             event = self._try_create_platform_event(
                 platform_name, module_path, class_name, attr_name,
-                command, msg, meta, session_id,
+                command, msg, meta, session_id, platform_instance,
             )
             if event:
                 return event
 
         # 默认回退到基础事件
-        return self._create_base_event(command, msg, meta, session_id)
+        return self._create_base_event(command, msg, meta, session_id, platform_instance)
 
     def _try_create_platform_event(
         self,
@@ -277,13 +277,12 @@ class EventFactory:
         msg: AstrBotMessage,
         meta: PlatformMetadata,
         session_id: str,
+        platform_instance=None,
     ) -> AstrMessageEvent | None:
         """尝试动态导入并创建平台特定事件，失败返回 None"""
         try:
             import importlib
-            platform = self._get_platform_instance(meta.id)
-            logger.debug(f"_try_create_platform_event: 平台={platform_name}, platform_id={meta.id}")
-
+            platform = platform_instance or self._get_platform_instance(meta.id)
             if not platform:
                 logger.warning(f"无法获取 {platform_name} 平台实例")
                 return None
@@ -316,7 +315,6 @@ class EventFactory:
             if hasattr(event, 'platform_instance'):
                 event.platform_instance = platform
 
-            logger.debug(f"成功创建 {class_name}")
             return event
 
         except ImportError as e:
@@ -353,6 +351,7 @@ class EventFactory:
     def _create_base_event(
         self, command: str, msg: AstrBotMessage,
         meta: PlatformMetadata, session_id: str,
+        platform_instance=None,
     ) -> AstrMessageEvent:
         """创建基础事件对象（作为回退方案）"""
         event = AstrMessageEvent(
@@ -369,7 +368,7 @@ class EventFactory:
 
         # 尝试设置平台实例引用
         try:
-            platform_instance = self._get_platform_instance(meta.id)
+            platform_instance = platform_instance or self._get_platform_instance(meta.id)
             logger.debug(f"_create_base_event: 尝试获取平台实例，platform_id={meta.id}")
             if platform_instance:
                 event.platform_instance = platform_instance

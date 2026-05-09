@@ -688,7 +688,7 @@ class ReminderManager:
                     reminder_name = item['name']
                     if reminder_name in self.plugin.linked_tasks and self.plugin.linked_tasks[reminder_name]:
                         linked_count = len(self.plugin.linked_tasks[reminder_name])
-                        result += f"   🔗 链接任务: {linked_count}个\n"
+                        result += f"   链接任务: {linked_count}个\n"
 
                     result += f"   创建时间: {item.get('created_at', 'N/A')}\n\n"
 
@@ -881,7 +881,7 @@ class ReminderManager:
                 else:
                     logger.warning(f"提醒已发送但未拿到 message_id，无法自动撤回: {item.get('name')}")
 
-            logger.info(f"提醒 '{item.get('name')}' 已发送到 {session}")
+            logger.debug(f"提醒 '{item.get('name')}' 已发送到 {session}")
 
             # 处理链接任务
             linked_commands = self.plugin.linked_tasks.get(item.get('name'), [])
@@ -995,7 +995,7 @@ class ReminderManager:
 
     async def _execute_linked_command(self, linked_task_data: str | Dict, unified_msg_origin: str, item: Dict):
         """执行单个链接任务"""
-        logger.info(f"开始执行链接任务: {linked_task_data}")
+        logger.debug(f"开始执行链接任务: {linked_task_data}")
 
         is_admin = item.get('is_admin', True)
         self_id = item.get('self_id')
@@ -1009,7 +1009,7 @@ class ReminderManager:
             command = linked_task_data.get('command', '')
             # 还原组件，并兼容历史占位写法（[at:xxx]/[atall]）
             message_structure = linked_task_data.get('message_structure', [])
-            if isinstance(message_structure, list):
+            if isinstance(message_structure, list) and message_structure:
                 message_structure = normalize_message_structure(message_structure)
                 for comp in message_structure:
                     if comp['type'] == 'at':
@@ -1018,15 +1018,15 @@ class ReminderManager:
                         original_components.append(At(qq="all"))
                     elif comp['type'] == 'face':
                         original_components.append(Face(id=comp['id']))
-
-        # 兼容历史链接任务：也从 command 文本中解析 [at:xxx]/[atall]
-        # 注意：不要使用 collect_text_from_message_structure，因为它会丢弃非文本内容（如唤醒前缀）
-        cmd_structure = normalize_message_structure([{'type': 'text', 'content': command}])
-        for comp in cmd_structure:
-            if comp.get('type') == 'at':
-                original_components.append(At(qq=comp.get('qq', '')))
-            elif comp.get('type') == 'atall':
-                original_components.append(At(qq="all"))
+        
+            else:
+                # 兼容历史链接任务：也从 command 文本中解析 [at:xxx]/[atall]
+                cmd_structure = normalize_message_structure([{'type': 'text', 'content': command}])
+                for comp in cmd_structure:
+                    if comp.get('type') == 'at':
+                        original_components.append(At(qq=comp.get('qq', '')))
+                    elif comp.get('type') == 'atall':
+                        original_components.append(At(qq="all"))
 
         # 去重组件，避免重复 At/AtAll/Face
         deduped = []
@@ -1043,8 +1043,6 @@ class ReminderManager:
             seen.add(key)
             deduped.append(comp)
         original_components = deduped
-
-        logger.info(f"执行链接任务命令: {command}, 组件数: {len(original_components)}")
 
         if command:
             await execute_linked_command(self.plugin, command, unified_msg_origin, item,

@@ -24,6 +24,7 @@ dist/
 .coverage
 coverage.xml
 .tox/
+tests/
 
 # OS
 .DS_Store
