@@ -91,7 +91,7 @@ function getContextHint() {
     const who = context.creator_name || context.created_by;
     return `当前绑定用户：${who}，来源会话：${context.source_origin || "未知"}`;
   }
-  return "请先让 AstrBot admin 在聊天中发送“启动提醒控制台”，再使用此页面。";
+  return "需管理员在聊天中发送“启动提醒控制台”后，方可使用此页面。";
 }
 
 function getErrorMessage(error, fallback) {
