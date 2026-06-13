@@ -21,6 +21,7 @@ const els = {
   listMeta: document.getElementById("listMeta"),
   searchInput: document.getElementById("searchInput"),
   emptyState: document.getElementById("emptyState"),
+  emptyStateHint: document.getElementById("emptyStateHint"),
   editorForm: document.getElementById("editorForm"),
   editorTitle: document.getElementById("editorTitle"),
   editorModeLabel: document.getElementById("editorModeLabel"),
@@ -530,9 +531,12 @@ function renderEditor() {
     els.emptyState.classList.remove("hidden");
     els.editorForm.classList.add("hidden");
     if (hasWebuiContext()) {
+      els.emptyStateHint.classList.add("hidden");
       setStatus("");
     } else {
-      setStatus(getContextHint(), "error", { autoHide: false });
+      els.emptyStateHint.classList.remove("hidden");
+      els.emptyStateHint.textContent = getContextHint();
+      setStatus("");
     }
     return;
   }

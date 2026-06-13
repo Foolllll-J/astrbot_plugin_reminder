@@ -445,6 +445,17 @@ body {
   color: var(--muted);
 }
 
+.empty-state-hint {
+  margin-top: 16px !important;
+  padding: 10px 20px;
+  border-radius: 14px;
+  background: rgba(253, 232, 231, 0.96);
+  border: 1px solid rgba(180, 35, 24, 0.22);
+  color: #8f2218;
+  font-size: 14px;
+  line-height: 1.6;
+}
+
 .status-banner {
   border-radius: 14px;
   border: 1px solid rgba(110, 92, 68, 0.12);
