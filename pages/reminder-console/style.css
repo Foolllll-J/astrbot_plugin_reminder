@@ -520,6 +520,10 @@ body {
   grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
+.grid.four {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
 .grid.five {
   grid-template-columns: repeat(5, minmax(0, 1fr));
 }
@@ -639,11 +643,8 @@ body {
   }
 
   .grid.two,
+  .grid.four,
   .grid.five {
-    grid-template-columns: 1fr;
-  }
-
-  .execution-recall-grid {
     grid-template-columns: 1fr;
   }
 

@@ -172,7 +172,9 @@ def serialize_sessions(enabled_sessions: list[str] | None) -> list[dict[str, str
     return sessions
 
 
-def sanitize_message_structure(payload: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
+def sanitize_message_structure(
+    payload: list[dict[str, Any]] | None,
+) -> list[dict[str, Any]]:
     sanitized: list[dict[str, Any]] = []
     for item in payload or []:
         item_type = str(item.get("type", "")).strip().lower()
@@ -199,7 +201,9 @@ def sanitize_message_structure(payload: list[dict[str, Any]] | None) -> list[dic
     return sanitized
 
 
-def sanitize_linked_commands(payload: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
+def sanitize_linked_commands(
+    payload: list[dict[str, Any]] | None,
+) -> list[dict[str, Any]]:
     linked: list[dict[str, Any]] = []
     for item in payload or []:
         command = str(item.get("command", "")).strip()
@@ -216,7 +220,9 @@ def sanitize_linked_commands(payload: list[dict[str, Any]] | None) -> list[dict[
     return linked
 
 
-def sanitize_task_commands(payload: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
+def sanitize_task_commands(
+    payload: list[dict[str, Any]] | None,
+) -> list[dict[str, Any]]:
     commands: list[dict[str, Any]] = []
     for item in payload or []:
         command = str(item.get("command", "")).strip()
@@ -226,7 +232,9 @@ def sanitize_task_commands(payload: list[dict[str, Any]] | None) -> list[dict[st
     return commands
 
 
-def serialize_item(item: dict[str, Any], linked_commands: list[dict[str, Any]] | None) -> dict[str, Any]:
+def serialize_item(
+    item: dict[str, Any], linked_commands: list[dict[str, Any]] | None
+) -> dict[str, Any]:
     cron_expr = item.get("cron_expr", item.get("cron", ""))
     payload = {
         "name": item.get("name", ""),
@@ -237,6 +245,7 @@ def serialize_item(item: dict[str, Any], linked_commands: list[dict[str, Any]] |
         "enabled_sessions": serialize_sessions(item.get("enabled_sessions", [])),
         "execution": split_execution_fields(item),
         "executed_count": int(item.get("executed_count", 0) or 0),
+        "delay_minutes": int(item.get("delay_minutes", 0) or 0),
         "created_at": item.get("created_at", ""),
         "created_by": item.get("created_by", ""),
         "creator_name": item.get("creator_name", ""),

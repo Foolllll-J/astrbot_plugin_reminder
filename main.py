@@ -28,7 +28,11 @@ from .core.task_manager import TaskManager
 from .core.reminder_manager import ReminderManager
 from .core.linked_task_manager import LinkedTaskManager
 from .webui.api import ReminderWebUIApi
-from .webui.context_store import build_context_from_event, load_webui_context, save_webui_context
+from .webui.context_store import (
+    build_context_from_event,
+    load_webui_context,
+    save_webui_context,
+)
 
 
 class ReminderPlugin(Star):
@@ -47,7 +51,7 @@ class ReminderPlugin(Star):
         load_reminders(self)
         self.webui_api = ReminderWebUIApi(self)
         self.webui_api.register()
-        self.whitelist = self.config.get('whitelist', [])
+        self.whitelist = self.config.get("whitelist", [])
         self._recall_notice_sent: set[str] = set()
 
         logger.info("定时提醒助手已加载")
@@ -107,23 +111,27 @@ class ReminderPlugin(Star):
         """检查目标会话是否支持自动撤回"""
         return check_recall_capability(self, unified_msg_origin)
 
-    async def _notify_recall_not_supported_once(self, item: Dict, unified_msg_origin: str, reason: str):
+    async def _notify_recall_not_supported_once(
+        self, item: Dict, unified_msg_origin: str, reason: str
+    ):
         """在执行期对同一提醒+会话仅提示一次"不支持自动撤回"。"""
-        item_id = item.get('id') or item.get('name', 'unknown')
+        item_id = item.get("id") or item.get("name", "unknown")
         notice_key = f"{item_id}::{unified_msg_origin}"
         if notice_key in self._recall_notice_sent:
             return
         self._recall_notice_sent.add(notice_key)
 
         try:
-            reminder_name = item.get('name', '未命名提醒')
+            reminder_name = item.get("name", "未命名提醒")
             message_chain = MessageChain()
             message_chain.chain = [
-                Plain(f"⚠️ 提醒「{reminder_name}」已配置自动撤回，但{reason}，将仅发送不撤回。")
+                Plain(
+                    f"⚠️ 提醒「{reminder_name}」已配置自动撤回，但{reason}，将仅发送不撤回。"
+                )
             ]
             await self.context.send_message(unified_msg_origin, message_chain)
         except Exception as e:
-            logger.warning(f"发送\"自动撤回不支持\"提示失败: {e}")
+            logger.warning(f'发送"自动撤回不支持"提示失败: {e}')
 
     async def _save_media_component(self, msg_comp, prefix: str):
         """保存媒体组件到本地"""
@@ -133,11 +141,15 @@ class ReminderPlugin(Star):
         self.webui_context = payload
         save_webui_context(self.webui_context_file, payload)
 
-    async def _send_aiocqhttp_with_message_id(self, item: Dict, unified_msg_origin: str):
+    async def _send_aiocqhttp_with_message_id(
+        self, item: Dict, unified_msg_origin: str
+    ):
         """通过 OneBot v11 发送并获取 message_id"""
         return await send_aiocqhttp_with_message_id(self, item, unified_msg_origin)
 
-    async def _recall_message_later(self, unified_msg_origin: str, message_id, delay_seconds: int):
+    async def _recall_message_later(
+        self, unified_msg_origin: str, message_id, delay_seconds: int
+    ):
         """延迟撤回消息"""
         await recall_message_later(self, unified_msg_origin, message_id, delay_seconds)
 
@@ -255,7 +267,6 @@ class ReminderPlugin(Star):
         async for result in linked_task_manager.link_reminder_to_task(event):
             yield event.plain_result(result)
 
-
     @filter.command("启动提醒", alias={"启用提醒"})
     async def enable_reminder(self, event: AstrMessageEvent):
         """启动定时提醒
@@ -263,7 +274,9 @@ class ReminderPlugin(Star):
         用法2: /启动提醒 <提醒名称或序号> [@好友号|#群号 ...] - 在指定会话启动该提醒
         """
         reminder_manager = ReminderManager(self)
-        async for result in reminder_manager.toggle_reminder_session(event, enable=True):
+        async for result in reminder_manager.toggle_reminder_session(
+            event, enable=True
+        ):
             yield event.plain_result(result)
 
     @filter.command("停止提醒", alias={"终止提醒", "停用提醒"})
@@ -273,7 +286,9 @@ class ReminderPlugin(Star):
         用法2: /停止提醒 <提醒名称或序号> [@好友号|#群号 ...] - 在指定会话停止该提醒
         """
         reminder_manager = ReminderManager(self)
-        async for result in reminder_manager.toggle_reminder_session(event, enable=False):
+        async for result in reminder_manager.toggle_reminder_session(
+            event, enable=False
+        ):
             yield event.plain_result(result)
 
     @filter.command("启动任务", alias={"启用任务"})
@@ -307,13 +322,20 @@ class ReminderPlugin(Star):
             yield event.plain_result(result)
 
     @filter.command("删除链接")
-    async def delete_linked_task(self, event: AstrMessageEvent, reminder_index: int = None, command_index: int = None):
+    async def delete_linked_task(
+        self,
+        event: AstrMessageEvent,
+        reminder_index: int = None,
+        command_index: int = None,
+    ):
         """删除指定的链接任务
         用法1: /删除链接 - 交互式删除，显示所有链接任务列表
         用法2: /删除链接 <提醒序号> <任务序号> - 直接删除指定链接任务
         """
         linked_task_manager = LinkedTaskManager(self)
-        async for result in linked_task_manager.delete_linked_task(event, reminder_index, command_index):
+        async for result in linked_task_manager.delete_linked_task(
+            event, reminder_index, command_index
+        ):
             yield event.plain_result(result)
 
     @filter.permission_type(filter.PermissionType.ADMIN)

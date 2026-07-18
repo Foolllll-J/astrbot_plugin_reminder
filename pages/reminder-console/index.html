@@ -126,31 +126,42 @@
             <div id="sessionList" class="stack-list"></div>
           </section>
 
-          <section id="executionRecallPanel" class="panel">
-            <div class="panel-title">执行与撤回</div>
-            <div class="grid five execution-recall-grid">
+          <section id="executionPanel" class="panel">
+            <div class="panel-title">执行设置</div>
+            <div class="grid two">
               <label class="field">
                 <span>执行次数</span>
                 <input id="executionCount" class="text-input mono" type="number" min="0" value="0" />
               </label>
               <label class="field">
-                <span>撤回天</span>
+                <span>随机延迟</span>
+                <input id="delayMinutes" class="text-input mono" type="number" min="0" value="0" />
+              </label>
+            </div>
+            <div class="inline-hint section-hint">执行次数为 0 表示不限，延迟为 0 表示关闭。</div>
+          </section>
+
+          <section id="recallPanel" class="panel">
+            <div class="panel-title">自动撤回</div>
+            <div class="grid four">
+              <label class="field">
+                <span>天数</span>
                 <input id="recallDays" class="text-input mono" type="number" min="0" value="0" />
               </label>
               <label class="field">
-                <span>撤回时</span>
+                <span>小时</span>
                 <input id="recallHours" class="text-input mono" type="number" min="0" value="0" />
               </label>
               <label class="field">
-                <span>撤回分</span>
+                <span>分钟</span>
                 <input id="recallMinutes" class="text-input mono" type="number" min="0" value="0" />
               </label>
               <label class="field">
-                <span>撤回秒</span>
+                <span>秒</span>
                 <input id="recallSeconds" class="text-input mono" type="number" min="0" value="0" />
               </label>
             </div>
-            <div class="inline-hint section-hint">执行次数为 0 表示不限，撤回参数全为 0 表示关闭。</div>
+            <div class="inline-hint section-hint">全为 0 表示关闭。</div>
           </section>
 
           <section id="reminderContentPanel" class="panel">

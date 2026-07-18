@@ -26,6 +26,7 @@ from .utils import (
     resolve_session_origin,
     split_task_commands_text,
     translate_to_apscheduler_cron,
+    validate_delay_minutes,
     is_user_allowed,
 )
 
@@ -38,7 +39,9 @@ class TaskManager:
 
     def _find_task_by_identifier(self, identifier: str):
         """Resolve a task by display index or exact name."""
-        task_items = [item for item in self.plugin.reminders if item.get('is_task', False)]
+        task_items = [
+            item for item in self.plugin.reminders if item.get("is_task", False)
+        ]
 
         if identifier.isdigit():
             index = int(identifier) - 1
@@ -47,7 +50,7 @@ class TaskManager:
             return None
 
         for item in task_items:
-            if item.get('name') == identifier:
+            if item.get("name") == identifier:
                 return item
         return None
 
@@ -59,7 +62,9 @@ class TaskManager:
         if not commands:
             return "N/A"
         if numbered:
-            return "\n".join(f"{idx}. {command}" for idx, command in enumerate(commands, 1))
+            return "\n".join(
+                f"{idx}. {command}" for idx, command in enumerate(commands, 1)
+            )
         return " | ".join(commands)
 
     async def add_task(self, event: AstrMessageEvent) -> AsyncGenerator[str, None]:
@@ -84,6 +89,7 @@ class TaskManager:
 
             parsed_add_args = parse_add_scene_arguments(remaining)
             max_executions = parsed_add_args["max_executions"]
+            delay_minutes = parsed_add_args["delay_minutes"]
             session_param = parsed_add_args["session_param"]
 
             target_origin = resolve_session_origin(
@@ -110,28 +116,39 @@ class TaskManager:
                 yield f"cron表达式无效: {e}"
                 return
 
+            # 验证延迟
+            if delay_minutes is not None:
+                error = validate_delay_minutes(cron_expr, delay_minutes)
+                if error:
+                    yield f"❌ {error}"
+                    return
+
             # 检查重名
             for existing_item in self.plugin.reminders:
-                if existing_item.get('name') == name and existing_item.get('is_task', False):
+                if existing_item.get("name") == name and existing_item.get(
+                    "is_task", False
+                ):
                     yield f"❌ 已存在名为 '{name}' 的任务，请使用其他名称"
                     return
 
             # 构建任务数据
             item = {
-                'name': name,
-                'is_task': True,
-                'cron_expr': cron_expr,
-                'enabled_sessions': [target_origin],
-                'created_by': event.get_sender_id(),
-                'creator_name': event.get_sender_name(),
-                'is_admin': event.is_admin(),
-                'self_id': event.get_self_id(),
-                'created_at': datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                "name": name,
+                "is_task": True,
+                "cron_expr": cron_expr,
+                "enabled_sessions": [target_origin],
+                "created_by": event.get_sender_id(),
+                "creator_name": event.get_sender_name(),
+                "is_admin": event.is_admin(),
+                "self_id": event.get_self_id(),
+                "created_at": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             }
             if max_executions is not None:
-                item['max_executions'] = max_executions
+                item["max_executions"] = max_executions
                 if max_executions > 0:
-                    item['executed_count'] = 0
+                    item["executed_count"] = 0
+            if delay_minutes is not None:
+                item["delay_minutes"] = max(0, delay_minutes)
 
             # 处理指令内容
             await self._process_command_content(event, item, command, cron_expr)
@@ -148,6 +165,8 @@ class TaskManager:
             result_msg = f"✅ 任务 '{name}' 添加成功！\nCron: {cron_expr}\n目标: {describe_origin(target_origin)}"
             if max_executions is not None:
                 result_msg += f"\n执行轮次上限: {max_executions if max_executions > 0 else '不限'}"
+            if delay_minutes is not None and delay_minutes > 0:
+                result_msg += f"\n随机延迟: {delay_minutes} 分钟"
             result_msg += f"\n步骤: {self._format_task_commands(item)}"
             yield result_msg
 
@@ -168,7 +187,7 @@ class TaskManager:
                 yield "❌ 参数缺失！用法: /编辑任务 <任务名称或序号> [@好友号|#群号] [cron表达式] [指令]\n提示: 所有参数都可选，可单独或组合编辑"
                 return
 
-            identifier, remaining = parts[1], parts[2] if len(parts) > 2 else ""
+            identifier = parts[1]
             tokens_all = extract_plain_text_tokens(event.get_messages())
             parsed_edit = parse_edit_scene_tokens(tokens_all, header_token_count=2)
             session_params: List[str] = parsed_edit["session_params"]
@@ -178,7 +197,9 @@ class TaskManager:
             if identifier.isdigit():
                 # 使用序号查找
                 idx = int(identifier) - 1
-                tasks_only = [item for item in self.plugin.reminders if item.get('is_task', False)]
+                tasks_only = [
+                    item for item in self.plugin.reminders if item.get("is_task", False)
+                ]
                 if 0 <= idx < len(tasks_only):
                     target_item = tasks_only[idx]
                 else:
@@ -188,7 +209,7 @@ class TaskManager:
                 # 使用名称查找
                 name = identifier
                 for item in self.plugin.reminders:
-                    if item.get('is_task', False) and item.get('name') == name:
+                    if item.get("is_task", False) and item.get("name") == name:
                         target_item = item
                         break
 
@@ -198,17 +219,25 @@ class TaskManager:
 
             # 如果没有提供剩余参数，显示当前配置
             if not parsed_edit["tokens_after_session"] and not session_params:
-                current_cron = target_item.get('cron_expr', target_item.get('cron', '未设置'))
+                current_cron = target_item.get(
+                    "cron_expr", target_item.get("cron", "未设置")
+                )
                 current_command = self._format_task_commands(target_item, numbered=True)
 
-                enabled_sessions = target_item.get('enabled_sessions', [])
+                enabled_sessions = target_item.get("enabled_sessions", [])
                 sessions_info = ""
                 if enabled_sessions:
-                    sessions_info = "\n📍 当前会话:\n" + "\n".join([f"  - {describe_origin(s)}" for s in enabled_sessions])
+                    sessions_info = "\n📍 当前会话:\n" + "\n".join(
+                        [f"  - {describe_origin(s)}" for s in enabled_sessions]
+                    )
                 else:
                     sessions_info = "\n📍 当前会话: 无"
 
-                yield f"📋 当前任务配置：\nCron: {current_cron}\n步骤:\n{current_command}{sessions_info}"
+                current_delay = int(target_item.get("delay_minutes", 0) or 0)
+                delay_info = (
+                    f"\n随机延迟: {current_delay} 分钟" if current_delay > 0 else ""
+                )
+                yield f"📋 当前任务配置：\nCron: {current_cron}\n步骤:\n{current_command}{delay_info}{sessions_info}"
                 return
 
             # 如果有会话参数，解析并更新会话
@@ -226,7 +255,7 @@ class TaskManager:
 
                 if new_sessions:
                     # 覆盖式更新会话
-                    target_item['enabled_sessions'] = new_sessions
+                    target_item["enabled_sessions"] = new_sessions
                     session_changed = True
 
                     # 重新调度
@@ -235,11 +264,19 @@ class TaskManager:
             # 解析参数
             limit_updated = parsed_edit["limit_updated"]
             limit_value = parsed_edit["limit_value"]
+            delay_updated = parsed_edit["delay_updated"]
+            delay_value = parsed_edit["delay_value"]
             cron_expr = parsed_edit["cron_expr"]
             command = parsed_edit["payload_text"]
 
             # 如果都没有提供，显示帮助
-            if not cron_expr and not command and not session_params and not limit_updated:
+            if (
+                not cron_expr
+                and not command
+                and not session_params
+                and not limit_updated
+                and not delay_updated
+            ):
                 yield "❌ 请提供要修改的cron表达式、指令或会话！\n用法: /编辑任务 <任务名称或序号> [@好友号|#群号] [cron表达式] [指令]"
                 return
 
@@ -249,25 +286,50 @@ class TaskManager:
 
             # 更新cron表达式
             if cron_expr:
-                target_item['cron_expr'] = cron_expr
+                target_item["cron_expr"] = cron_expr
                 await self.plugin._reschedule_reminder(target_item)
+
+            # 更新延迟
+            delay_changed = False
+            if delay_updated:
+                effective_cron = cron_expr or target_item.get("cron_expr", "")
+                normalized_delay = max(0, int(delay_value or 0))
+                error = validate_delay_minutes(effective_cron, normalized_delay)
+                if error:
+                    yield f"❌ {error}"
+                    return
+                target_item["delay_minutes"] = normalized_delay
+                delay_changed = True
 
             # 更新指令
             if command:
-                await self._process_command_content(event, target_item, command, cron_expr or target_item.get('cron_expr', ''))
+                await self._process_command_content(
+                    event,
+                    target_item,
+                    command,
+                    cron_expr or target_item.get("cron_expr", ""),
+                )
 
             # 如果有任何变更，记录编辑时间并更新编辑者信息
-            if session_changed or cron_expr or command or limit_changed:
-                target_item['edited_at'] = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-                target_item['created_by'] = event.get_sender_id()
-                target_item['creator_name'] = event.get_sender_name()
-                target_item['is_admin'] = event.is_admin()
+            if (
+                session_changed
+                or cron_expr
+                or command
+                or limit_changed
+                or delay_changed
+            ):
+                target_item["edited_at"] = datetime.datetime.now().strftime(
+                    "%Y-%m-%d %H:%M:%S"
+                )
+                target_item["created_by"] = event.get_sender_id()
+                target_item["creator_name"] = event.get_sender_name()
+                target_item["is_admin"] = event.is_admin()
 
             # 保存更新
             self.plugin._save_reminders()
 
-            current_cron = target_item.get('cron_expr', target_item.get('cron', ''))
-            sessions = list(target_item.get('enabled_sessions', []))
+            current_cron = target_item.get("cron_expr", target_item.get("cron", ""))
+            sessions = list(target_item.get("enabled_sessions", []))
             session_count = len(sessions)
             msg = (
                 "✅ 任务已编辑！\n"
@@ -276,14 +338,17 @@ class TaskManager:
                 f"步骤: {self._format_task_commands(target_item)}\n"
                 f"已影响会话数: {session_count}"
             )
-            if 'max_executions' in target_item:
+            current_delay = int(target_item.get("delay_minutes", 0) or 0)
+            if current_delay > 0:
+                msg += f"\n随机延迟: {current_delay} 分钟"
+            if "max_executions" in target_item:
                 try:
-                    max_executions = int(target_item.get('max_executions', 0) or 0)
+                    max_executions = int(target_item.get("max_executions", 0) or 0)
                 except Exception:
                     max_executions = 0
                 if max_executions > 0:
                     try:
-                        executed_count = int(target_item.get('executed_count', 0) or 0)
+                        executed_count = int(target_item.get("executed_count", 0) or 0)
                     except Exception:
                         executed_count = 0
                     msg += f"\n执行轮次: {executed_count}/{max_executions}"
@@ -296,7 +361,9 @@ class TaskManager:
             logger.error(f"编辑任务时出错: {e}", exc_info=True)
             yield f"❌ 编辑任务时出错: {e}"
 
-    async def delete_task(self, event: AstrMessageEvent, key: str = None) -> AsyncGenerator[str, None]:
+    async def delete_task(
+        self, event: AstrMessageEvent, key: str = None
+    ) -> AsyncGenerator[str, None]:
         """删除定时任务"""
         try:
             # 权限检查
@@ -309,7 +376,9 @@ class TaskManager:
                 return
 
             # 获取过滤后的任务列表（只包含任务）
-            task_items = [item for item in self.plugin.reminders if item.get('is_task', False)]
+            task_items = [
+                item for item in self.plugin.reminders if item.get("is_task", False)
+            ]
 
             # 查找目标任务
             target_index = None
@@ -319,15 +388,15 @@ class TaskManager:
                     target_item = task_items[idx]
                     # 在原始列表中找到对应的索引
                     for i, item in enumerate(self.plugin.reminders):
-                        if item['name'] == target_item['name']:
+                        if item["name"] == target_item["name"]:
                             target_index = i
                             break
             else:
                 for i, item in enumerate(task_items):
-                    if item.get('name') == key:
+                    if item.get("name") == key:
                         # 在原始列表中找到对应的索引
                         for j, orig_item in enumerate(self.plugin.reminders):
-                            if orig_item['name'] == key:
+                            if orig_item["name"] == key:
                                 target_index = j
                                 break
                         break
@@ -352,7 +421,9 @@ class TaskManager:
             logger.error(f"删除任务时出错: {e}", exc_info=True)
             yield f"❌ 删除任务时出错: {e}"
 
-    async def list_tasks(self, event: AstrMessageEvent, name: str = "") -> AsyncGenerator[str, None]:
+    async def list_tasks(
+        self, event: AstrMessageEvent, name: str = ""
+    ) -> AsyncGenerator[str, None]:
         """查看任务"""
         try:
             # 权限检查
@@ -365,7 +436,9 @@ class TaskManager:
                 return
 
             # 筛选任务
-            items = [item for item in self.plugin.reminders if item.get('is_task', False)]
+            items = [
+                item for item in self.plugin.reminders if item.get("is_task", False)
+            ]
 
             if not items:
                 yield "当前没有任务"
@@ -386,7 +459,7 @@ class TaskManager:
                 else:
                     item_name = params
                     for item in items:
-                        if item['name'] == item_name:
+                        if item["name"] == item_name:
                             target_item = item
                             break
 
@@ -395,7 +468,7 @@ class TaskManager:
                     return
 
                 # 构建详情消息
-                enabled_sessions = target_item.get('enabled_sessions', [])
+                enabled_sessions = target_item.get("enabled_sessions", [])
                 info_text = f"📋 任务详情: {target_item['name']}\n\n"
                 if enabled_sessions:
                     info_text += "🎯 已启用会话:\n"
@@ -406,21 +479,26 @@ class TaskManager:
 
                 info_text += f"⏰ 定时规则: {target_item.get('cron', target_item.get('cron_expr', 'N/A'))}\n"
                 try:
-                    max_executions = int(target_item.get('max_executions', 0) or 0)
+                    max_executions = int(target_item.get("max_executions", 0) or 0)
                 except Exception:
                     max_executions = 0
                 if max_executions > 0:
                     try:
-                        executed_count = int(target_item.get('executed_count', 0) or 0)
+                        executed_count = int(target_item.get("executed_count", 0) or 0)
                     except Exception:
                         executed_count = 0
                     info_text += f"🔁 执行轮次: {executed_count}/{max_executions}\n"
                 # 优先显示编辑时间，如果没有则显示创建时间
-                if target_item.get('edited_at'):
+                if target_item.get("edited_at"):
                     info_text += f"📅 最后编辑: {target_item['edited_at']}\n"
                 else:
-                    info_text += f"📅 创建时间: {target_item.get('created_at', 'N/A')}\n"
+                    info_text += (
+                        f"📅 创建时间: {target_item.get('created_at', 'N/A')}\n"
+                    )
                 info_text += f"👤 创建者ID: {target_item.get('created_by', '未知')}\n"
+                current_delay = int(target_item.get("delay_minutes", 0) or 0)
+                if current_delay > 0:
+                    info_text += f"⏳ 随机延迟: {current_delay} 分钟\n"
                 info_text += f"\n🔧 执行步骤:\n{self._format_task_commands(target_item, numbered=True)}\n"
 
                 yield info_text
@@ -430,23 +508,28 @@ class TaskManager:
                 for idx, item in enumerate(items, 1):
                     result += f"{idx}. {item['name']}\n"
 
-                    enabled_sessions = item.get('enabled_sessions', [])
+                    enabled_sessions = item.get("enabled_sessions", [])
                     if enabled_sessions:
                         result += f"   已启用会话数: {len(enabled_sessions)}\n"
                     else:
                         result += "   已启用会话数: 0\n"
 
-                    result += f"   cron: {item.get('cron_expr', item.get('cron', 'N/A'))}\n"
+                    result += (
+                        f"   cron: {item.get('cron_expr', item.get('cron', 'N/A'))}\n"
+                    )
                     try:
-                        max_executions = int(item.get('max_executions', 0) or 0)
+                        max_executions = int(item.get("max_executions", 0) or 0)
                     except Exception:
                         max_executions = 0
                     if max_executions > 0:
                         try:
-                            executed_count = int(item.get('executed_count', 0) or 0)
+                            executed_count = int(item.get("executed_count", 0) or 0)
                         except Exception:
                             executed_count = 0
                         result += f"   轮次: {executed_count}/{max_executions}\n"
+                    current_delay = int(item.get("delay_minutes", 0) or 0)
+                    if current_delay > 0:
+                        result += f"   随机延迟: {current_delay} 分钟\n"
                     result += f"   步骤: {self._format_task_commands(item)}\n"
                     result += f"   创建时间: {item.get('created_at', 'N/A')}\n\n"
 
@@ -457,7 +540,9 @@ class TaskManager:
             logger.error(f"查看任务时出错: {e}", exc_info=True)
             yield f"❌ 查看任务时出错: {e}"
 
-    async def toggle_task_session(self, event: AstrMessageEvent, enable: bool) -> AsyncGenerator[str, None]:
+    async def toggle_task_session(
+        self, event: AstrMessageEvent, enable: bool
+    ) -> AsyncGenerator[str, None]:
         """启动或停止任务"""
         try:
             # 权限检查
@@ -477,13 +562,19 @@ class TaskManager:
 
             if session_params:
                 invalid_params = [
-                    p for p in session_params if normalize_session_param_token(p) is None
+                    p
+                    for p in session_params
+                    if normalize_session_param_token(p) is None
                 ]
                 if invalid_params:
                     invalid_str = " ".join(invalid_params)
                     yield f"❌ 会话参数无效: {invalid_str}\n用法: /{action}任务 <任务名称或序号> [@好友号|#群号 ...]"
                     return
-                raw_targets = [normalize_session_param_token(p) for p in session_params if normalize_session_param_token(p)]
+                raw_targets = [
+                    normalize_session_param_token(p)
+                    for p in session_params
+                    if normalize_session_param_token(p)
+                ]
             else:
                 raw_targets = [None]
 
@@ -512,11 +603,13 @@ class TaskManager:
                 resolved_sessions.append(resolved)
 
             if not resolved_sessions:
-                unresolved_str = " ".join(unresolved_targets) if unresolved_targets else "当前会话"
+                unresolved_str = (
+                    " ".join(unresolved_targets) if unresolved_targets else "当前会话"
+                )
                 yield f"❌ 无法识别目标会话: {unresolved_str}\n请检查会话参数（@好友号 或 #群号）"
                 return
 
-            enabled_sessions = list(target_item.get('enabled_sessions', []))
+            enabled_sessions = list(target_item.get("enabled_sessions", []))
             changed = False
             success_sessions: List[str] = []
             skipped_sessions: List[str] = []
@@ -537,7 +630,7 @@ class TaskManager:
                     success_sessions.append(session)
                     changed = True
 
-            target_item['enabled_sessions'] = enabled_sessions
+            target_item["enabled_sessions"] = enabled_sessions
             if changed:
                 await self.plugin._reschedule_reminder(target_item)
                 self.plugin._save_reminders()
@@ -551,7 +644,9 @@ class TaskManager:
 
             if skipped_sessions:
                 skipped_reason = "已启用" if enable else "未启用"
-                lines.append(f"跳过: {len(skipped_sessions)} 个会话（{skipped_reason}）")
+                lines.append(
+                    f"跳过: {len(skipped_sessions)} 个会话（{skipped_reason}）"
+                )
                 for session in skipped_sessions:
                     lines.append(f"- {describe_origin(session)}")
 
@@ -572,15 +667,21 @@ class TaskManager:
         """执行定时任务"""
         await dispatch_task(self.plugin, item, session)
 
-    async def _process_command_content(self, event, item: Dict, command: str, cron_expr: str):
+    async def _process_command_content(
+        self, event, item: Dict, command: str, cron_expr: str
+    ):
         """处理指令内容（新增和编辑都使用相同逻辑）"""
         message_structure = await extract_inline_message_structure(
             event.get_messages(),
             cron_expr,
-            lambda comp: self.plugin._save_media_component(comp, getattr(comp, 'type', 'media').lower()),
+            lambda comp: self.plugin._save_media_component(
+                comp, getattr(comp, "type", "media").lower()
+            ),
         )
         message_structure = normalize_message_structure(message_structure)
-        normalized_command = collect_text_from_message_structure(message_structure).strip()
+        normalized_command = collect_text_from_message_structure(
+            message_structure
+        ).strip()
 
         final_command = command if command else normalized_command
         if not final_command:
@@ -590,10 +691,10 @@ class TaskManager:
         if not commands:
             raise ValueError("任务指令不能为空")
 
-        item['commands'] = commands
-        item['command'] = commands[0]['command']
+        item["commands"] = commands
+        item["command"] = commands[0]["command"]
         if message_structure:
-            item['message_structure'] = message_structure
+            item["message_structure"] = message_structure
 
     async def execute_now(self, event: AstrMessageEvent) -> AsyncGenerator[str, None]:
         """立即执行任务"""
@@ -616,13 +717,15 @@ class TaskManager:
             if re.fullmatch(r"\d+", key):
                 # 按序号查找
                 index = int(key) - 1
-                task_list = [i for i in self.plugin.reminders if i.get('is_task', False)]
+                task_list = [
+                    i for i in self.plugin.reminders if i.get("is_task", False)
+                ]
                 if 0 <= index < len(task_list):
                     item = task_list[index]
             else:
                 # 按名称查找
                 for i in self.plugin.reminders:
-                    if i.get('name') == key and i.get('is_task', False):
+                    if i.get("name") == key and i.get("is_task", False):
                         item = i
                         break
 
@@ -631,7 +734,7 @@ class TaskManager:
                 return
 
             # 在所有启用的会话中执行
-            enabled_sessions = item.get('enabled_sessions', [])
+            enabled_sessions = item.get("enabled_sessions", [])
             if not enabled_sessions:
                 yield f"❌ 任务 '{item.get('name')}' 未在任何会话启用"
                 return

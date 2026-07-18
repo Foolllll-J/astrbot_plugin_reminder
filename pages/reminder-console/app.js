@@ -40,7 +40,9 @@ const els = {
   sessionOrigin: document.getElementById("sessionOrigin"),
   sessionList: document.getElementById("sessionList"),
   executionCount: document.getElementById("executionCount"),
-  executionRecallPanel: document.getElementById("executionRecallPanel"),
+  delayMinutes: document.getElementById("delayMinutes"),
+  executionPanel: document.getElementById("executionPanel"),
+  recallPanel: document.getElementById("recallPanel"),
   recallDays: document.getElementById("recallDays"),
   recallHours: document.getElementById("recallHours"),
   recallMinutes: document.getElementById("recallMinutes"),
@@ -131,6 +133,7 @@ function makeEmptyDraft(kind) {
     },
     enabled_sessions: [],
     execution: { mode: "unlimited", count: 0 },
+    delay_minutes: 0,
     recall: { enabled: false, days: 0, hours: 0, minutes: 0, seconds: 0 },
     message_structure: kind === "task" ? [] : [{ type: "text", content: "" }],
     command: "",
@@ -164,6 +167,7 @@ function normalizeDraft(item) {
       ...base.execution,
       ...(item?.execution || {}),
     },
+    delay_minutes: item?.delay_minutes ?? base.delay_minutes,
     recall: {
       ...base.recall,
       ...(item?.recall || {}),
@@ -318,6 +322,7 @@ function syncDraftFromInputs() {
     mode: executionCount > 0 ? "limited" : "unlimited",
     count: executionCount,
   };
+  state.draft.delay_minutes = Math.max(0, Number(els.delayMinutes.value || 0));
   const recallDays = Math.max(0, Number(els.recallDays.value || 0));
   const recallHours = Math.max(0, Number(els.recallHours.value || 0));
   const recallMinutes = Math.max(0, Number(els.recallMinutes.value || 0));
@@ -558,12 +563,13 @@ function renderEditor() {
   els.cronMonth.value = state.draft.cron_fields?.month || "";
   els.cronWeekday.value = state.draft.cron_fields?.weekday || "";
   els.executionCount.value = state.draft.execution?.count || 0;
+  els.delayMinutes.value = state.draft.delay_minutes || 0;
   els.recallDays.value = state.draft.recall?.days || 0;
   els.recallHours.value = state.draft.recall?.hours || 0;
   els.recallMinutes.value = state.draft.recall?.minutes || 0;
   els.recallSeconds.value = state.draft.recall?.seconds || 0;
 
-  els.executionRecallPanel.classList.toggle("hidden", isTask);
+  els.recallPanel.classList.toggle("hidden", isTask);
   els.reminderContentPanel.classList.toggle("hidden", isTask);
   els.linkedCommandPanel.classList.toggle("hidden", isTask);
   els.taskCommandPanel.classList.toggle("hidden", !isTask);
@@ -601,6 +607,7 @@ function buildSavePayload() {
     cron_fields: state.draft.cron_fields,
     enabled_sessions: state.draft.enabled_sessions,
     execution: state.draft.execution,
+    delay_minutes: state.draft.delay_minutes,
     recall: state.draft.recall,
     message_structure: state.draft.message_structure,
     command: state.draft.command,

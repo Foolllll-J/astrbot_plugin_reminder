@@ -2,7 +2,7 @@
 链接任务管理器 - 处理提醒与任务的链接功能
 """
 
-from typing import Dict, List, AsyncGenerator
+from typing import AsyncGenerator
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent
 from astrbot.api.message_components import At, Face
@@ -22,7 +22,9 @@ class LinkedTaskManager:
 
     def _find_reminder_by_identifier(self, identifier: str):
         """Resolve a reminder by display index or exact name."""
-        reminder_items = [item for item in self.plugin.reminders if not item.get('is_task', False)]
+        reminder_items = [
+            item for item in self.plugin.reminders if not item.get("is_task", False)
+        ]
 
         if identifier.isdigit():
             index = int(identifier) - 1
@@ -31,11 +33,13 @@ class LinkedTaskManager:
             return None
 
         for item in reminder_items:
-            if item.get('name') == identifier:
+            if item.get("name") == identifier:
                 return item
         return None
 
-    async def link_reminder_to_task(self, event: AstrMessageEvent) -> AsyncGenerator[str, None]:
+    async def link_reminder_to_task(
+        self, event: AstrMessageEvent
+    ) -> AsyncGenerator[str, None]:
         """将指令链接到提醒，提醒执行后自动执行对应指令
         用法: /链接提醒 <提醒名称或序号> <指令> [参数可选]
         示例: /链接提醒 早安 /签到
@@ -49,7 +53,7 @@ class LinkedTaskManager:
                 return
 
             # 解析参数
-            parts = event.message_str.strip().split(' ', 2)
+            parts = event.message_str.strip().split(" ", 2)
             if len(parts) < 3:
                 yield (
                     "格式错误！\n"
@@ -67,7 +71,7 @@ class LinkedTaskManager:
                 yield f"❌ 未找到名为 '{reminder_identifier}' 的提醒"
                 return
 
-            reminder_name = reminder_item['name']
+            reminder_name = reminder_item["name"]
 
             # 验证指令格式
             if not command_with_args:
@@ -79,8 +83,12 @@ class LinkedTaskManager:
                 self.plugin.linked_tasks[reminder_name] = []
 
             # 解析指令文本和消息组件
-            parsed_command_structure = normalize_message_structure([{'type': 'text', 'content': command_with_args}])
-            normalized_command = collect_text_from_message_structure(parsed_command_structure).strip()
+            parsed_command_structure = normalize_message_structure(
+                [{"type": "text", "content": command_with_args}]
+            )
+            normalized_command = collect_text_from_message_structure(
+                parsed_command_structure
+            ).strip()
             if normalized_command:
                 command_with_args = normalized_command
             if not command_with_args:
@@ -90,31 +98,23 @@ class LinkedTaskManager:
             # 提取 At 和 Face 组件
             message_structure = []
             for comp in parsed_command_structure:
-                if comp.get('type') in ('at', 'atall'):
+                if comp.get("type") in ("at", "atall"):
                     message_structure.append(comp)
 
             for msg_comp in event.get_messages():
                 if isinstance(msg_comp, At):
                     qq = str(msg_comp.qq)
-                    if qq.lower() == 'all':
-                        message_structure.append({
-                            "type": "atall"
-                        })
+                    if qq.lower() == "all":
+                        message_structure.append({"type": "atall"})
                     else:
-                        message_structure.append({
-                            "type": "at",
-                            "qq": qq
-                        })
+                        message_structure.append({"type": "at", "qq": qq})
                 elif isinstance(msg_comp, Face):
-                    message_structure.append({
-                        "type": "face",
-                        "id": msg_comp.id
-                    })
+                    message_structure.append({"type": "face", "id": msg_comp.id})
 
             # 创建链接项
             linked_item = {
-                'command': command_with_args,
-                'message_structure': message_structure
+                "command": command_with_args,
+                "message_structure": message_structure,
             }
             self.plugin.linked_tasks[reminder_name].append(linked_item)
             self.plugin._save_reminders()
@@ -131,7 +131,9 @@ class LinkedTaskManager:
             logger.error(f"链接提醒失败: {e}", exc_info=True)
             yield f"链接提醒失败: {e}"
 
-    async def list_linked_tasks(self, event: AstrMessageEvent) -> AsyncGenerator[str, None]:
+    async def list_linked_tasks(
+        self, event: AstrMessageEvent
+    ) -> AsyncGenerator[str, None]:
         """查看已链接的任务
         用法1: /查看链接 - 显示所有提醒及其链接的任务
         用法2: /查看链接 <提醒名称或序号> - 显示指定提醒的链接任务详情
@@ -158,22 +160,29 @@ class LinkedTaskManager:
                     yield f"❌ 未找到名为 '{reminder_identifier}' 的提醒"
                     return
 
-                reminder_name = reminder_item['name']
-                if reminder_name not in self.plugin.linked_tasks or not self.plugin.linked_tasks[reminder_name]:
+                reminder_name = reminder_item["name"]
+                if (
+                    reminder_name not in self.plugin.linked_tasks
+                    or not self.plugin.linked_tasks[reminder_name]
+                ):
                     yield f"提醒 '{reminder_name}' 没有链接任何任务"
                     return
 
                 linked_commands = self.plugin.linked_tasks[reminder_name]
                 result = f"📋 提醒 '{reminder_name}' 已链接的任务:\n\n"
                 for i, cmd_data in enumerate(linked_commands, 1):
-                    cmd_str = cmd_data if isinstance(cmd_data, str) else cmd_data.get('command', '')
+                    cmd_str = (
+                        cmd_data
+                        if isinstance(cmd_data, str)
+                        else cmd_data.get("command", "")
+                    )
                     # 显示组件信息
                     extras = []
                     if isinstance(cmd_data, dict):
-                        msg_struct = cmd_data.get('message_structure', [])
-                        face_count = sum(1 for x in msg_struct if x['type'] == 'face')
-                        at_count = sum(1 for x in msg_struct if x['type'] == 'at')
-                        atall_count = sum(1 for x in msg_struct if x['type'] == 'atall')
+                        msg_struct = cmd_data.get("message_structure", [])
+                        face_count = sum(1 for x in msg_struct if x["type"] == "face")
+                        at_count = sum(1 for x in msg_struct if x["type"] == "at")
+                        atall_count = sum(1 for x in msg_struct if x["type"] == "atall")
                         if face_count:
                             extras.append(f"表情{face_count}个")
                         if at_count:
@@ -198,11 +207,17 @@ class LinkedTaskManager:
                             if isinstance(cmd_data, str):
                                 cmd_str = cmd_data
                             elif isinstance(cmd_data, dict):
-                                cmd_str = cmd_data.get('command', '')
-                                msg_struct = cmd_data.get('message_structure', [])
-                                face_count = sum(1 for x in msg_struct if x['type'] == 'face')
-                                at_count = sum(1 for x in msg_struct if x['type'] == 'at')
-                                atall_count = sum(1 for x in msg_struct if x['type'] == 'atall')
+                                cmd_str = cmd_data.get("command", "")
+                                msg_struct = cmd_data.get("message_structure", [])
+                                face_count = sum(
+                                    1 for x in msg_struct if x["type"] == "face"
+                                )
+                                at_count = sum(
+                                    1 for x in msg_struct if x["type"] == "at"
+                                )
+                                atall_count = sum(
+                                    1 for x in msg_struct if x["type"] == "atall"
+                                )
                                 if face_count:
                                     extras.append(f"表情{face_count}个")
                                 if at_count:
@@ -226,7 +241,12 @@ class LinkedTaskManager:
             logger.error(f"查看链接任务失败: {e}", exc_info=True)
             yield f"查看链接任务失败: {e}"
 
-    async def delete_linked_task(self, event: AstrMessageEvent, reminder_index: int = None, command_index: int = None) -> AsyncGenerator[str, None]:
+    async def delete_linked_task(
+        self,
+        event: AstrMessageEvent,
+        reminder_index: int = None,
+        command_index: int = None,
+    ) -> AsyncGenerator[str, None]:
         """删除已链接的任务
         用法1: /删除链接 - 交互式删除，显示所有链接任务列表
         用法2: /删除链接 <提醒序号> <任务序号> - 直接删除指定链接任务
@@ -274,8 +294,11 @@ class LinkedTaskManager:
 
                 # 获取要删除的命令
                 deleted_command_data = commands[command_index - 1]
-                deleted_command = deleted_command_data if isinstance(deleted_command_data, str) else deleted_command_data.get(
-                    'command', '')
+                deleted_command = (
+                    deleted_command_data
+                    if isinstance(deleted_command_data, str)
+                    else deleted_command_data.get("command", "")
+                )
 
                 # 从列表中删除命令
                 commands.pop(command_index - 1)
@@ -301,11 +324,15 @@ class LinkedTaskManager:
                         if isinstance(cmd_data, str):
                             cmd_str = cmd_data
                         elif isinstance(cmd_data, dict):
-                            cmd_str = cmd_data.get('command', '')
-                            msg_struct = cmd_data.get('message_structure', [])
-                            face_count = sum(1 for x in msg_struct if x['type'] == 'face')
-                            at_count = sum(1 for x in msg_struct if x['type'] == 'at')
-                            atall_count = sum(1 for x in msg_struct if x['type'] == 'atall')
+                            cmd_str = cmd_data.get("command", "")
+                            msg_struct = cmd_data.get("message_structure", [])
+                            face_count = sum(
+                                1 for x in msg_struct if x["type"] == "face"
+                            )
+                            at_count = sum(1 for x in msg_struct if x["type"] == "at")
+                            atall_count = sum(
+                                1 for x in msg_struct if x["type"] == "atall"
+                            )
                             if face_count:
                                 extras.append(f"表情{face_count}个")
                             if at_count:

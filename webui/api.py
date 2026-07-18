@@ -1,23 +1,19 @@
 import datetime
 import hashlib
-import os
 import traceback
 from pathlib import Path
 from typing import Any
 
 from astrbot.api import logger
-from astrbot.api.star import StarTools
 from quart import jsonify, request
 
-from ..core.linked_task_manager import LinkedTaskManager
-from ..core.reminder_manager import ReminderManager
-from ..core.task_manager import TaskManager
 from ..core.utils import (
     apply_execution_limit,
     execute_task,
     save_reminders,
     send_reminder,
     translate_to_apscheduler_cron,
+    validate_delay_minutes,
 )
 from .payloads import (
     build_cron_expr,
@@ -172,7 +168,9 @@ class ReminderWebUIApi:
         item["cron_expr"] = cron_expr
 
         platform = self._resolve_platform(item)
-        enabled_sessions = normalize_sessions(payload.get("enabled_sessions"), platform=platform)
+        enabled_sessions = normalize_sessions(
+            payload.get("enabled_sessions"), platform=platform
+        )
         if not enabled_sessions:
             raise ValueError("至少需要一个目标会话")
         item["enabled_sessions"] = enabled_sessions
@@ -186,7 +184,16 @@ class ReminderWebUIApi:
                 item.pop("executed_count", None)
                 limit_changed = True
         else:
-            limit_changed = apply_execution_limit(item, execution_fields["max_executions"])
+            limit_changed = apply_execution_limit(
+                item, execution_fields["max_executions"]
+            )
+
+        delay = max(0, int(payload.get("delay_minutes", 0) or 0))
+        if delay > 0:
+            error = validate_delay_minutes(cron_expr, delay)
+            if error:
+                raise ValueError(f"❌ {error}")
+        item["delay_minutes"] = delay
 
         if is_task:
             if not item.get("is_task", False):
@@ -221,8 +228,14 @@ class ReminderWebUIApi:
                 item["recall_after_seconds"] = recall_seconds
 
             linked_commands = sanitize_linked_commands(payload.get("linked_commands"))
-            if original_name and original_name != name and original_name in self.plugin.linked_tasks:
-                self.plugin.linked_tasks[name] = self.plugin.linked_tasks.pop(original_name)
+            if (
+                original_name
+                and original_name != name
+                and original_name in self.plugin.linked_tasks
+            ):
+                self.plugin.linked_tasks[name] = self.plugin.linked_tasks.pop(
+                    original_name
+                )
             if linked_commands:
                 self.plugin.linked_tasks[name] = linked_commands
             else:
@@ -404,10 +417,14 @@ class ReminderWebUIApi:
     def _require_webui_context(self) -> dict[str, Any]:
         payload = self.plugin.webui_context
         if not payload:
-            raise ValueError("请先由 AstrBot admin 在聊天中使用“启动提醒控制台”后再通过 WebUI 编辑。")
+            raise ValueError(
+                "请先由 AstrBot admin 在聊天中使用“启动提醒控制台”后再通过 WebUI 编辑。"
+            )
         return payload
 
-    def _apply_webui_context(self, item: dict[str, Any], payload: dict[str, Any]) -> None:
+    def _apply_webui_context(
+        self, item: dict[str, Any], payload: dict[str, Any]
+    ) -> None:
         item["created_by"] = str(payload.get("created_by", "") or "").strip()
         item["creator_name"] = str(payload.get("creator_name", "") or "").strip()
         item["is_admin"] = bool(payload.get("is_admin", False))
