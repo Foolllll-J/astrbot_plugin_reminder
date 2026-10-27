@@ -830,7 +830,7 @@ function installEvents() {
 
   document.getElementById("addSessionBtn").addEventListener("click", () => {
     const origin = els.sessionOrigin.value.trim();
-    if (!/^.+:(GroupMessage|FriendMessage):\d+$/.test(origin)) {
+    if (!/^.+:(GroupMessage|FriendMessage):[A-Za-z0-9_.-]+$/.test(origin)) {
       setStatus("目标会话 ID 格式不正确，示例：DemoBot:GroupMessage:123456789", "error", { autoHide: false });
       return;
     }

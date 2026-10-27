@@ -857,13 +857,17 @@ def resolve_session_origin(
     return current_origin
 
 
+_SESSION_ID_RE = re.compile(r"[A-Za-z0-9_.-]+")
+
+
 def normalize_session_param_token(token: str | None) -> str | None:
-    """仅当 @/# 后为纯数字时视作会话参数。"""
+    """仅当 @/# 后带会话 ID 时视作会话参数。"""
     if not token or token[0] not in ("@", "#"):
         return None
 
+    # ID 可能非数字（如 QQ 官方 group_openid）；限字符集避免把正文误判为会话参数
     raw = token[1:]
-    if raw.isdigit():
+    if _SESSION_ID_RE.fullmatch(raw):
         return f"{token[0]}{raw}"
 
     return None

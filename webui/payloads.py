@@ -98,6 +98,14 @@ def split_execution_fields(item: dict[str, Any]) -> dict[str, Any]:
     return {"mode": "limited", "count": count}
 
 
+_SESSION_ID_RE = re.compile(r"[A-Za-z0-9_.-]+")
+
+
+def _is_valid_session_id(value: str) -> bool:
+    # 部分平台的会话 ID 非纯数字（如 QQ 官方 group_openid）；限字符集避免把正文误判为会话参数
+    return bool(_SESSION_ID_RE.fullmatch(str(value or "").strip()))
+
+
 def normalize_sessions(
     payload: list[dict[str, Any]] | None,
     *,
@@ -111,11 +119,11 @@ def normalize_sessions(
         if (
             raw_origin
             and ":GroupMessage:" in raw_origin
-            and raw_origin.split(":GroupMessage:", 1)[1].isdigit()
+            and _is_valid_session_id(raw_origin.split(":GroupMessage:", 1)[1])
         ) or (
             raw_origin
             and ":FriendMessage:" in raw_origin
-            and raw_origin.split(":FriendMessage:", 1)[1].isdigit()
+            and _is_valid_session_id(raw_origin.split(":FriendMessage:", 1)[1])
         ):
             if raw_origin not in seen:
                 seen.add(raw_origin)
@@ -124,7 +132,7 @@ def normalize_sessions(
 
         kind = str(item.get("kind", "")).strip().lower()
         target_id = str(item.get("target_id", "")).strip()
-        if not target_id.isdigit():
+        if not _is_valid_session_id(target_id):
             continue
 
         msg_type = ""
